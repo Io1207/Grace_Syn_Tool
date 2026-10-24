@@ -373,8 +373,7 @@ class DynamicPolicy {
                     << "q=del(Start,v0)(" << q_read << ") " << (mv_read ? "has move" : "NO move") << "\n";
 
             if (!mv_read)
-                std::cerr << "[warn] BDD has no move at (v0, del(Start,v0)) — either v0 not in W or fairsyn convention mismatches"
-                            
+                std::cerr << "[warn] BDD has no move at (v0, del(Start,v0)) — either v0 not in W or fairsyn convention mismatches";
         }
 
         // Library keys usable for B: A_tilde in B only (fewer assumptions = harder

@@ -45,7 +45,7 @@
 //         OptLib(const OptLib&) = delete;
 //         OptLib& operator=(const OptLib&) = delete;
 //         OptLib(OptLib&&) = default;
-//         OptLib& operator=(OptLib&&) = default;
+//         OptLib& operator=(OptLib&&) = delete; // game_ is a reference
 
 //         // Store a synthesized subgame strategy. Takes:
 //         //   controller_query_bin — path to the controller_query binary
@@ -262,6 +262,20 @@
 //         }
 // };
 
+#pragma once
+
+#include "game.h"
+#include "player.h"
+#include "fairsyn_writer.h"
+
+#include <cstdint>
+#include <map>
+#include <vector>
+#include <set>
+#include <string>
+#include <stdexcept>
+#include <memory>
+
 using Mask = uint32_t;
 
 inline Mask to_mask(const std::vector<int>& v) { Mask m = 0; for (int i : v) m |= (Mask(1) << i); return m; }
@@ -310,7 +324,7 @@ class OptLib {
         OptLib(const OptLib&) = delete;
         OptLib& operator=(const OptLib&) = delete;
         OptLib(OptLib&&) = default;
-        OptLib& operator=(OptLib&&) = default;
+        OptLib& operator=(OptLib&&) = delete; // game_ is a reference
 
         void store(const SubgameKey& k, const std::string& controller_query_bin,
                    const std::string& bdd_file, const std::string& hoa_file)

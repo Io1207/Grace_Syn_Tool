@@ -32,7 +32,7 @@ static void print_usage(const char* prog) {
         "  " << prog << " --arena <a.txt> --spec <s.txt> play ...\n";
 }
 
-static void load_optlib_from_dir(const std::string& workdir, const std::string& controller_query_bin, Game& game, OptLib& lib) {
+static void load_optlib_from_dir(const std::string& workdir, const std::string& controller_query_bin, [[maybe_unused]] Game& game, OptLib& lib) {
     namespace fs = std::filesystem;
     if (!fs::exists(workdir)) {
         std::cerr << "[error] workdir does not exist: " << workdir << "\n";
@@ -107,7 +107,7 @@ static int mode_transform(Game& game, const GR1_spec& full_spec, const std::stri
 }
 
 static int mode_synth(Game& game, const std::string& fairsyn_bin, const std::string& controller_query_bin,
-                      const std::string& workdir, const std::string& winregion_f,
+                      const std::string& workdir, [[maybe_unused]] const std::string& winregion_f,
                       const FairsynConfig& fc, const GR1_spec& full_spec, bool parallel, bool keep_tmp = false) {
     // std::set<int> W = load_win_region(winregion_f, game.num_states);
     namespace fs = std::filesystem;

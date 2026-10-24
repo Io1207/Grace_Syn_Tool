@@ -31,18 +31,20 @@ Grace/
 │   └── plot_policy.py            plots and RQ2 convergence metric
 │
 ├── build/                        build definitions (and, after building, outputs)
-│   ├── CMakeLists.txt            builds build/bin/Grace from ../src
+│   ├── CMakeLists.txt            builds build/bin/grace from ../src
 │   ├── build_all.sh              fetches Owl + FairSyn, builds everything
 │   ├── Dockerfile                reproducible build environment
 │   ├── requirements.txt          Python packages for plotting
 │   ├── cmake/                    (generated) CMake build tree
-│   └── bin/Grace             (generated) the main binary
+│   └── bin/grace             (generated) the main binary
 │
 ├── benchmarks/                   game files used in the evaluation
 ├── traces/                       Adam strategy files for play / RQ2
 │
 └── third_party/                  populated by build/build_all.sh (or pre-fetched)
     ├── fairsyn/                  cloned from https://gitlab.com/kmallik/fairsyn.git
+    ├── genie/                    cloned from https://gitlab.com/kmallik/genie.git (FairSyn's BDD library)
+    ├── genie-deps/               CUDD, Sylvan, cpphoafparser built by Genie's install.sh
     └── owl/                      Owl 21.0, unpacked from owl-linux-amd64-21.0.zip
 ```
 

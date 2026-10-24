@@ -11,7 +11,6 @@
 
 class HoaAutomaton {
 public:
-    // Parse from an already-open stream.
     static HoaAutomaton parse(std::istream& in) {
         HoaAutomaton aut;
         aut.parse_impl(in);
@@ -27,19 +26,11 @@ public:
     int start_state() const { return start_; }
     int num_states()  const { return num_states_; }
 
-    // Index of a named AP, or -1 if not present in this automaton (treated
-    // as "false" by step(), since an AP this automaton never read about
-    // cannot affect its transitions).
     int ap_index(const std::string& name) const {
         auto it = ap_name_to_idx_.find(name);
         return (it == ap_name_to_idx_.end()) ? -1 : it->second;
     }
 
-    // Deterministic transition: from state q, given the SET of AP NAMES
-    // that are true at the target (all APs not listed are false), return
-    // the unique next state. Throws if no matching transition is found
-    // (which would indicate either a non-exhaustive/non-deterministic
-    // automaton, or a bug in how the valuation was constructed).
     int step(int q, const std::set<std::string>& true_aps) const {
         std::vector<bool> val(ap_names_.size(), false);
         for (const auto& name : true_aps) {
@@ -49,13 +40,10 @@ public:
         return step_bits(q, val);
     }
 
-    // Same as step(), but takes a pre-built bitvector (val[i] = is AP i
-    // true). Slightly faster when calling step() many times for the same
-    // valuation-construction logic, since the caller can build the
-    // bitvector once via ap_index() lookups instead of re-hashing names.
     int step_bits(int q, const std::vector<bool>& val) const {
         if (q < 0 || q >= (int)transitions_.size())
             throw std::out_of_range("HoaAutomaton::step: state " + std::to_string(q) + " out of range");
+    
         for (const auto& [guard, target] : transitions_[q]) {
             if (eval_guard(guard, val)) return target;
         }
@@ -68,28 +56,16 @@ public:
     const std::vector<std::string>& ap_names() const { return ap_names_; }
 
 private:
-    // ── Guard AST ────────────────────────────────────────────────────────
-    // A guard is a small Boolean expression over AP indices. We store it
-    // as a flat token list and evaluate recursively (the formulas owl emits
-    // are short — a handful of APs — so a simple recursive-descent
-    // evaluator is both simpler and fast enough; no need to compile to a
-    // BDD or truth table here).
     struct GuardNode {
         enum Kind { TRUE, FALSE, AP, NOT, AND, OR } kind;
-        int ap_idx = -1;                       // for Kind::AP
-        std::vector<GuardNode> children;        // for NOT (1 child), AND/OR (>=2)
+        int ap_idx = -1;
+        std::vector<GuardNode> children;
     };
 
     int start_ = 0;
     int num_states_ = 0;
     std::vector<std::string> ap_names_;
     std::map<std::string, int> ap_name_to_idx_;
-    // transitions_[state] = list of (guard, target_state), checked in order;
-    // for a well-formed deterministic automaton exactly one guard matches
-    // any given valuation, so evaluation order doesn't matter for
-    // correctness — we still check in declaration order for determinism
-    // of behavior in case of a malformed/non-exhaustive automaton (the
-    // first match wins rather than picking arbitrarily).
     std::vector<std::vector<std::pair<GuardNode,int>>> transitions_;
 
     static bool eval_guard(const GuardNode& g, const std::vector<bool>& val) {
@@ -223,7 +199,7 @@ private:
                 continue;
             }
 
-            \if (trimmed == "--END--") break;
+            if (trimmed == "--END--") break;
 
             if (starts_with(trimmed, "State:")) {
                 std::istringstream iss(trimmed.substr(6));
@@ -256,7 +232,6 @@ private:
     }
 
     void parse_ap_line(const std::string& rest) {
-        // rest is like: " 3 \"in_play\" \"g0_all\" \"a0_show\""
         std::istringstream iss(rest);
         int count;
         iss >> count;
@@ -264,7 +239,6 @@ private:
         ap_name_to_idx_.clear();
         std::string token;
         while (iss >> token) {
-            // token is a quoted name: "in_play" — strip the quotes.
             if (token.size() >= 2 && token.front() == '"' && token.back() == '"')
                 token = token.substr(1, token.size() - 2);
             int idx = (int)ap_names_.size();

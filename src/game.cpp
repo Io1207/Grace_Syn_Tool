@@ -4,10 +4,10 @@
 #include <stdexcept>
 
 State_space::State_space(int n)
-    : num_states(n), owner (n, 0), post (n), pre (n), region(n, PLAY) {}
+    : owner (n, 0), post (n), pre (n), region(n, PLAY), num_states(n) {}
 
 State_space::State_space(int n, int initial, std::vector<int> own, std::vector<std::vector<int>> edges)
-    : num_states(n), init (initial), owner (std::move(own)), post (std::move(edges)), pre (n), region (n, PLAY) {
+    : owner (std::move(own)), post (std::move(edges)), pre (n), region (n, PLAY), num_states(n), init (initial) {
     for (int i = 0; i < n; i++)
         for (int j : post[i]) pre[j].push_back(i);
 }
@@ -18,7 +18,7 @@ void State_space::add_edge(int from, int to) {
 }
 
 Game::Game(int n, int initial, State_space ss, bool live, bool safe, bool fair)
-    : num_states(n), init(initial), liveness(live), safety(safe), fairness(fair) , ss(std::move(ss)) {}
+    : ss(std::move(ss)), num_states(n), init(initial), liveness(live), safety(safe), fairness(fair) {}
 
 Game Game::transform_play_choose_show() const {
     const int n = num_states;

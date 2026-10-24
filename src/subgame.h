@@ -318,7 +318,7 @@ inline int run_synthesis_loop(Game& game, const SynthesisConfig& cfg, OptLib& li
             else            n_failed++;
         }
         if (jobs.empty()) continue;
-        if (cfg.verbose) std::cout <x< "[synth] level " << lvl << ": " << jobs.size() << " call(s)\n";
+        if (cfg.verbose) std::cout << "[synth] level " << lvl << ": " << jobs.size() << " call(s)\n";
         run_all(jobs);
         for (auto& j : jobs) finish(j);
     }

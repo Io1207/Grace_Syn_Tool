@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # build_all.sh — Build everything needed to run Grace from a fresh checkout:
 #   1. Owl 21.0 (linux-amd64)
-#   2. FairSyn (in turn needs genie)
+#   2. FairSyn, with Genie and Genie's libraries (CUDD, Sylvan, cpphoafparser)
 #   3. Grace
 #
 # Local copies in third_party/ are always preferred, so a pre-fetched (archived) artifact builds fully offline
@@ -14,6 +14,10 @@ JOBS="${JOBS:-$(nproc)}"
 
 FAIRSYN_GIT="${FAIRSYN_GIT:-https://gitlab.com/kmallik/fairsyn.git}"
 FAIRSYN_SRC="${FAIRSYN_SRC:-$TP/fairsyn}"
+
+GENIE_GIT="${GENIE_GIT:-https://gitlab.com/kmallik/genie.git}"
+GENIE_SRC="${GENIE_SRC:-$TP/genie}"
+GENIE_DEPS="${GENIE_DEPS:-$TP/genie-deps}"   # install prefix for CUDD, Sylvan, cpphoafparser
 
 OWL_URL="${OWL_URL:-https://github.com/owl-toolkit/owl/releases/download/release-21.0/owl-linux-amd64-21.0.zip}"
 OWL_ZIP="${OWL_ZIP:-$TP/owl-linux-amd64-21.0.zip}"
@@ -66,6 +70,19 @@ else
     echo "  using vendored sources (no .git): $FAIRSYN_SRC"
 fi
 
+# Genie sources
+step "Genie sources"
+if [[ ! -f "$GENIE_SRC/CMakeLists.txt" ]]; then
+    need git
+    echo "  cloning $GENIE_GIT"
+    git clone "$GENIE_GIT" "$GENIE_SRC"
+fi
+if [[ -d "$GENIE_SRC/.git" ]]; then
+    echo "  revision: $(git -C "$GENIE_SRC" rev-parse HEAD)"
+else
+    echo "  using vendored sources (no .git): $GENIE_SRC"
+fi
+
 if [[ "${FETCH_ONLY:-0}" == "1" ]]; then
     step "Dependencies fetched (FETCH_ONLY=1), skipping builds"
     exit 0
@@ -80,8 +97,20 @@ if ! python3 -c "import pandas, numpy, matplotlib" >/dev/null 2>&1; then
     warn "Python plotting packages missing (only needed for plots): pip install -r build/requirements.txt"
 fi
 
+step "Genie dependencies (CUDD, Sylvan, cpphoafparser)"
+if [[ -f "$GENIE_DEPS/.installed" ]]; then
+    echo "  already present: $GENIE_DEPS"
+else
+    for t in git make pkg-config autoreconf libtoolize wget tar; do need "$t"; done
+    mkdir -p "$GENIE_DEPS"
+    # install.sh clones/builds into ./submodules, so run it from the Genie checkout
+    (cd "$GENIE_SRC" && bash ./install.sh "$GENIE_DEPS/")
+    touch "$GENIE_DEPS/.installed"
+fi
+
 step "Building FairSyn"
-cmake -S "$FAIRSYN_SRC" -B "$FAIRSYN_SRC/build" -DCMAKE_BUILD_TYPE=Release
+cmake -S "$FAIRSYN_SRC" -B "$FAIRSYN_SRC/build" -DCMAKE_BUILD_TYPE=Release \
+    -Dgenie_HOME="$GENIE_SRC" -DCMAKE_PREFIX_PATH="$GENIE_DEPS"
 cmake --build "$FAIRSYN_SRC/build" -j "$JOBS"
 for b in controller_synthesis controller_query; do
     [[ -x "$FAIRSYN_SRC/build/bin/$b" ]] || die "expected $FAIRSYN_SRC/build/bin/$b after build"

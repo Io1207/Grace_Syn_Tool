@@ -7,14 +7,16 @@
 - CMake ≥ 3.16
 - `unzip`
 - `git` and `curl` (or `wget`) — only if `third_party/` is not already populated
-- FairSyn's build dependencies (see FairSyn's own README)
+- Genie's library build tools (for CUDD, Sylvan and cpphoafparser): `pkg-config`, `autoconf`, `automake`,
+  `libtool`, `wget`, GMP headers. On Debian/Ubuntu:
+  `sudo apt install pkg-config autoconf automake libtool wget libgmp-dev`
 - Optional, for plots: Python ≥ 3.8 with the packages in `build/requirements.txt`
 
 ## Option A — Docker (Recommended)
 
 ```bash
-docker build -f build/Dockerfile -t Grace .   # from the root
-docker run -it --rm Grace
+docker build -f build/Dockerfile -t grace .   # from the root
+docker run -it --rm grace
 # inside the container:
 ./script/smoke_test.sh
 ```
@@ -23,6 +25,7 @@ docker run -it --rm Grace
 
 ```bash
 pip install -r build/requirements.txt
+chmod +x build/build_all.sh script/*.sh   # in case execute permissions were lost (e.g. extracted from a zip)
 ./build/build_all.sh
 ./script/smoke_test.sh
 ```
@@ -30,9 +33,12 @@ pip install -r build/requirements.txt
 `build/build_all.sh` uses local copies in `third_party/` when present and fetches
 them otherwise, so an archived artifact with `third_party/` included builds
 without network access. To populate `third_party/` without building (e.g. to
-package the artifact): `FETCH_ONLY=1 ./build/build_all.sh`. 
+package the artifact): `FETCH_ONLY=1 ./build/build_all.sh`.
 
-> Note: the script doesn't build any ddependcies that the tools themselves need (eg: Fairsyn needs genie)
+FairSyn is built on [Genie](https://gitlab.com/kmallik/genie). The script clones Genie into
+`third_party/genie` and runs Genie's `install.sh`, which downloads and builds CUDD, Sylvan (v1.7.0) and
+cpphoafparser (0.99.2) into `third_party/genie-deps` (no `sudo` needed). This step always needs network
+access, even when `third_party/` was pre-fetched with `FETCH_ONLY=1`.
 
 ### Manual build
 
@@ -42,12 +48,17 @@ curl -fLO https://github.com/owl-toolkit/owl/releases/download/release-21.0/owl-
 unzip owl-linux-amd64-21.0.zip -d third_party/
 mv third_party/owl-*21.0 third_party/owl
 
-# 2. FairSyn
+# 2. Genie and its libraries (CUDD, Sylvan, cpphoafparser)
+git clone https://gitlab.com/kmallik/genie.git third_party/genie
+(cd third_party/genie && bash ./install.sh "$PWD/../genie-deps/")
+
+# 3. FairSyn (genie_HOME and CMAKE_PREFIX_PATH must be absolute paths)
 git clone --recursive https://gitlab.com/kmallik/fairsyn.git third_party/fairsyn
-cmake -S third_party/fairsyn -B third_party/fairsyn/build -DCMAKE_BUILD_TYPE=Release
+cmake -S third_party/fairsyn -B third_party/fairsyn/build -DCMAKE_BUILD_TYPE=Release \
+      -Dgenie_HOME="$PWD/third_party/genie" -DCMAKE_PREFIX_PATH="$PWD/third_party/genie-deps"
 cmake --build third_party/fairsyn/build -j
 
-# 3. Grace
+# 4. Grace
 cmake -S build -B build/cmake -DCMAKE_BUILD_TYPE=Release
 cmake --build build/cmake -j
 ```
@@ -56,13 +67,13 @@ cmake --build build/cmake -j
 
 | Binary | Path |
 |---|---|
-| Grace | `build/bin/Grace` |
+| Grace | `build/bin/grace` |
 | FairSyn synthesis | `third_party/fairsyn/build/bin/controller_synthesis` |
 | FairSyn controller queries | `third_party/fairsyn/build/bin/controller_query` |
 | Owl | `third_party/owl/bin/owl` |
 
 The scripts use these paths by default. To use tools installed elsewhere, set
-`GRACE_FAIRSYN`, `GRACE_CTRL_QUERY` and `GRAcE_OWL` (the Owl
+`GRACE_FAIRSYN`, `GRACE_CTRL_QUERY` and `GRACE_OWL` (the Owl
 `bin/` directory).
 
 ## Smoke test

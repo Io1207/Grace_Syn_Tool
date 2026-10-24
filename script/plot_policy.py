@@ -3,8 +3,7 @@
 plot_policy.py — Visualise adaptive-strategy play from the CSV written by --csv.
 
 Usage:
-    python3 plot_policy.py <play.csv> [--out fig.png] [--show] [--window 50]
-                           [--ainf "0|1"] [--threshold 0.99] [--no-heatmap]
+    python3 plot_policy.py <play.csv> [--out fig.png] [--show] [--window 50] [--ainf "0|1"] [--threshold 0.99] [--no-heatmap]
 """
 
 import sys

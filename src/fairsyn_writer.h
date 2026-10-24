@@ -10,7 +10,7 @@
 #include <stdexcept>
 #include <filesystem>
 #include <numeric>
-#include <threads>
+#include <thread>
 
 struct SubgameSpec {
     std::vector<int> a_indices;
@@ -47,7 +47,7 @@ inline VertexMap build_vertex_map(const Game& game, const std::set<int>& win_reg
     return vm;
 }
 
-inline void write_arena_file(const Game& game, const std::set<int>& win_region, const VertexMap& vm, std::ostream& out) {
+inline void write_arena_file(const Game& game, [[maybe_unused]] const std::set<int>& win_region, const VertexMap& vm, std::ostream& out) {
     const State_space* ss = game.get_state_space();
     const auto& post = ss->get_post();
 
@@ -77,7 +77,7 @@ inline void write_arena_file(const Game& game, const std::set<int>& win_region, 
     }
 }
 
-inline void write_arena_file(const Game& game, const std::set<int>& win_region, const VertexMap& vm, const std::string& path) {
+inline void write_arena_file(const Game& game, [[maybe_unused]] const std::set<int>& win_region, const VertexMap& vm, const std::string& path) {
     std::ofstream f(path);
     if (!f) throw std::runtime_error("Cannot open arena file: " + path);
     write_arena_file(game, win_region, vm, f);

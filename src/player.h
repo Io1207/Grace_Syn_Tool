@@ -72,9 +72,6 @@ public:
         return {to_orig(r.next_transformed), r.next_q};
     }
 
-    // ── Automaton transition ─────────────────────────────────────────────
-    // Compute the next Rabin state after moving to a known transformed
-    // target vertex. Uses the HOA automaton directly — no BDD query needed.
     int hoa_step(int q, int transformed_target) const {
         if (transformed_target < 0
             || transformed_target >= (int)ap_val_cache_.size())
@@ -84,17 +81,6 @@ public:
         return hoa_.step_bits(q, ap_val_cache_[transformed_target]);
     }
 
-    // ── Shadow-guess at an Adam vertex (u ∈ V!, owner==1) ───────────────
-    // Computes the hypothetical "what if Adam had yielded" continuation:
-    //
-    //   1. Case-3 edge: (choose_id[u], q) → (show_id[u], q1)
-    //      The automaton advances on seeing show_id[u].
-    //   2. Show-strategy query: (show_id[u], q1) → (v_show_transformed, q_show)
-    //      Eve's strategy picks the show-region move.
-    //
-    // The caller then compares Adam's real move to v_show (decoded to
-    // original vertex). If they match → mode=SHOW, q=q_show; else →
-    // mode=PLAY, q = hoa_step(q, play_id[real_move]).
     ShadowGuess shadow_guess(int orig_u, int q) const {
         int choose_v = choose_id_[orig_u];
         int show_v   = show_id_ [orig_u];
@@ -109,10 +95,9 @@ public:
         // Show-strategy query: Eve picks the show-region move from (show_v, q1)
         auto r = query_bdd(show_v, q1);
         if (r.next_transformed == -1) {
-            // Show region unreachable/not in winning set from here — this
+            // Show region unreachable/not in winning set from here - this
             // is unusual but possible if the subgame's winning region
-            // doesn't cover this vertex in the show region. The caller
-            // should fall back to play mode in this case.
+            // doesn't cover this vertex in the show region. Fall back to play mode
             return {-1, -1, q1};
         }
 
@@ -120,26 +105,6 @@ public:
         return {v_show_orig, r.next_q, q1};
     }
 
-    // // ── Automaton step for case-2 (Adam's real move) ─────────────────────
-    // // Given Adam's actual original-arena move v (at an Adam vertex in play
-    // // mode), computes the new Rabin state via the case-2 edge:
-    // //   (choose_id[u], q) → (play_id[v], q_play)
-    // // Note: q here is the state BEFORE the shadow-guess yield edge (i.e.,
-    // // the same q passed to shadow_guess), not q1 from inside shadow_guess.
-    // int q_after_play_move(int orig_v, int q) const {
-    //     int play_v = play_id_[orig_v];
-    //     if (play_v < 0)
-    //         throw std::logic_error(
-    //             "Eve::q_after_play_move: no play vertex for original vertex "
-    //             + std::to_string(orig_v)
-    //             + " (is this an Adam vertex? Adam has no play copy.)");
-    //     // HOA automaton step: seeing play_id[v] after being at choose_id[u]
-    //     return hoa_step(q, play_v);
-    // }
-
-    // ── Realizability check ───────────────────────────────────────────────
-    // Uses controller_query's sentinel (-1,-1) input to check if the BDD
-    // is satisfiable (winning region nonempty). Returns true if realizable.
     bool is_realizable() const {
         std::string cmd = controller_query_bin_
                           + " \"" + bdd_file_ + "\" -1 -1";
@@ -150,7 +115,6 @@ public:
         return result == 1;
     }
 
-    // ── Accessors ─────────────────────────────────────────────────────────
     int n_orig() const { return n_orig_; }
     int hoa_start_state() const { return hoa_.start_state(); }
 
@@ -171,7 +135,7 @@ public:
     }
 
 private:
-    Game& game_;
+    [[maybe_unused]] Game& game_;
     std::string controller_query_bin_;
     std::string bdd_file_;
     HoaAutomaton hoa_;
@@ -184,9 +148,6 @@ private:
     int n_orig_;
     std::vector<int> transformed_to_orig_;  // transformed id → original id
 
-    // Per transformed-vertex AP valuation bitvector (cached once at
-    // construction — the AP sets never change for a given subgame).
-    // ap_val_cache_[transformed_v][ap_idx] = true iff AP ap_idx holds there.
     std::vector<std::vector<bool>> ap_val_cache_;
 
     void build_transformed_to_orig() {
@@ -199,9 +160,6 @@ private:
         }
     }
 
-    // Build ap_val_cache_: for each transformed vertex, a bitvector of
-    // which APs (in the HOA automaton's AP ordering) are true there
-    // This avoids repeated string-set construction at query time
     void build_ap_valuation_cache() {
         int sz = 2 * n_orig_;
 
@@ -223,9 +181,6 @@ private:
         }
     }
 
-    // Run a shell command and return its stdout as a string
-    // Thin wrapper around popen — called at most a handful of times per
-    // game step (3-4 for Adam vertices, 1 for Eve vertices)
     static std::string run_cmd(const std::string& cmd) {
         std::array<char, 256> buf;
         std::string result;
@@ -234,7 +189,6 @@ private:
         while (fgets(buf.data(), (int)buf.size(), pipe))
             result += buf.data();
         pclose(pipe);
-        // Strip trailing whitespace/newline
         while (!result.empty() && (result.back()=='\n'||result.back()=='\r'||result.back()==' '))
             result.pop_back();
         return result;
