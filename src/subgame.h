@@ -291,6 +291,11 @@ inline int run_synthesis_loop(Game& game, const SynthesisConfig& cfg, OptLib& li
         for (int tv : W) wp << tv << "\n";
         lib.set_winning_region(W);
 
+        {
+            const std::string full_dir = cfg.work_dir + "/" + first[0].label;
+            lib.store({0, 0}, cfg.controller_query_bin, full_dir + "/controller.bdd", full_dir + "/rabin.hoa");
+        }
+
         if (cfg.verbose) std::cout << "[synth] |W| = " << W.size() << " transformed vertices\n";
         if (!W.count(lib.transformed_target(game.init)))
             std::cerr << "[warn] initial vertex " << game.init << " is not in W — the paper's guarantees do not apply from it.\n";
@@ -301,7 +306,7 @@ inline int run_synthesis_loop(Game& game, const SynthesisConfig& cfg, OptLib& li
     for (Mask g = 0; g < (Mask(1) << n); g++)
         for (Mask a = 0; a < (Mask(1) << m); a++) {
             if (a == full_a && g == full_g) continue;
-            if (g == 0 && a != 0) continue;
+            if (g == 0) continue;
             by_level[synth_level({a, g}, m, n)].push_back({a, g});
         }
 
@@ -323,7 +328,7 @@ inline int run_synthesis_loop(Game& game, const SynthesisConfig& cfg, OptLib& li
         for (auto& j : jobs) finish(j);
     }
 
-    const int total = 1 + static_cast<int>([&]{ size_t s = 0; for (auto& [l, k] : by_level) s += k.size(); return s; }());
+    const int total = 2 + static_cast<int>([&]{ size_t s = 0; for (auto& [l, k] : by_level) s += k.size(); return s; }());
     std::cout << "\n[timing] Subgames total     : " << total << "\n"
                    "[timing] Synthesis calls    : " << synth_calls << "\n"
                    "[timing] Pruned (coverage)  : " << n_pruned << "\n"

@@ -23,7 +23,6 @@
 #   --ainf         <set>   true A_inf for convergence report
 #   --parallel     parallel synthesis
 #   --skip-delete  keep temp dirs after synthesis (for debugging)
-#   --plot         plot CSV after play
 #   --outdir       <dir>   override output dir (default: out/ next to arena.txt)
 #   --fairsyn      <path>  controller_synthesis binary
 #   --ctrl-query   <path>  controller_query binary
@@ -37,9 +36,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Tool paths (override via environment)
-FAIRSYN="${GRACE_FAIRSYN:-$ROOT/third_party/fairsyn/build/bin/controller_synthesis}"
-CTRL_QUERY="${GRACE_CTRL_QUERY:-$ROOT/third_party/fairsyn/build/bin/controller_query}"
-OWL_PATH="${GRACE_OWL:-$ROOT/third_party/owl/bin}"
+FAIRSYN="${GRACE_FAIRSYN:-$ROOT/External_tools/fairsyn/build/bin/controller_synthesis}"
+CTRL_QUERY="${GRACE_CTRL_QUERY:-$ROOT/External_tools/fairsyn/build/bin/controller_query}"
+OWL_PATH="${GRACE_OWL:-$ROOT/External_tools/owl/owl-linux-musl-amd64-21.0/bin}"
 
 MODE="all"
 STEPS=500
@@ -93,9 +92,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 if   [[ -x "$ROOT/build/bin/grace" ]]; then BIN="$ROOT/build/bin/grace"
-elif [[ -x "$ROOT/src/main" ]];            then BIN="$ROOT/src/main"   # legacy Makefile build
+elif [[ -x "$ROOT/src/main" ]]; then BIN="$ROOT/src/main"   # legacy Makefile build
 else
-    echo "[error] Cannot find grace binary. Run ./build/build_all.sh first." >&2
+    echo "[error] Cannot find grace binary. Run ./build/build_all.sh first or build using makeile in src" >&2
     exit 1
 fi
 
@@ -110,14 +109,14 @@ esac
 if [[ "$MODE" == "synth" || "$MODE" == "all" ]]; then
     if [[ ! -x "$FAIRSYN" ]]; then
         echo "[error] controller_synthesis not found or not executable: $FAIRSYN" >&2
-        echo "        Run ./build/build_all.sh, set GRACE_FAIRSYN, or pass --fairsyn" >&2
+        echo "        Run ./External_tools/setup.sh, set GRACE_FAIRSYN, or pass --fairsyn" >&2
         exit 1
     fi
 fi
 if [[ "$MODE" == "synth" || "$MODE" == "play" || "$MODE" == "all" ]]; then
     if [[ ! -x "$CTRL_QUERY" ]]; then
         echo "[error] controller_query not found or not executable: $CTRL_QUERY" >&2
-        echo "        Run ./build/build_all.sh, set GRACE_CTRL_QUERY, or pass --ctrl-query" >&2
+        echo "        Run ./External_tools/setup.sh, set GRACE_CTRL_QUERY, or pass --ctrl-query" >&2
         exit 1
     fi
 fi
@@ -172,6 +171,7 @@ run_synth() {
 }
 
 run_play() {
+    #checking at least one BDD exists
     local found=0
     for d in "$OUTDIR"/A*/; do
         [[ -f "$d/controller.bdd" ]] && { found=1; break; }

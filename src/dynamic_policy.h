@@ -173,9 +173,9 @@ class DynamicPolicy {
         }
 
         int step(int v, int t = 0) {
-            State_space* ss = game_.get_state_space();
-            const auto& owner  = ss->get_owner();
-            const auto& assums = game_.spec.assumptions;
+            State_space* ss     = game_.get_state_space();
+            const auto& owner   = ss->get_owner();
+            const auto& assums  = game_.spec.assumptions;
             last_step_eve_ = false;
 
             // Liveness monitors 
@@ -195,15 +195,15 @@ class DynamicPolicy {
                 if (u_is_adam) {
                     ShadowGuess sg = lib_.shadow_guess(key, orig_u, s.q);
                     if (sg.v_show == -1 || real_v != sg.v_show) {
-                        s.mode = Mode::PLAY;
-                        s.q    = lib_.q_after_play_move(key, real_v, s.q);
+                        s.mode  = Mode::PLAY;
+                        s.q     = lib_.q_after_play_move(key, real_v, s.q);
                     } else {
-                        s.mode = Mode::SHOW;
-                        s.q    = sg.q_show;
+                        s.mode  = Mode::SHOW;
+                        s.q     = sg.q_show;
                     }
                 } else {
-                    s.q = lib_.hoa_step(key, s.q, lib_.transformed_target(real_v));
-                    s.mode = Mode::PLAY;
+                    s.q     = lib_.hoa_step(key, s.q, lib_.transformed_target(real_v));
+                    s.mode  = Mode::PLAY;
                 }
             };
 

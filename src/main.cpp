@@ -51,8 +51,6 @@ static void load_optlib_from_dir(const std::string& workdir, const std::string& 
         return res;
     };
 
-    /***** FIXED: load winning_vertices.txt (written during synth phase) so build_ap_verts includes in_W *****/
-    // Load winning region W if available
     std::string win_file = workdir + "/winning_vertices.txt";
     if (fs::exists(win_file)) {
         std::set<int> W;
@@ -132,7 +130,6 @@ static int mode_synth(Game& game, const std::string& fairsyn_bin, const std::str
     return 0;
 }
 
-/***** FIXED: mode_play() now takes controller_query_bin parameter (was missing) *****/
 static int mode_play(Game& game, const std::string& workdir, const std::string& controller_query_bin, int steps, DynamicPolicyParams params, const std::string& trace_file, 
                      const std::string& csv_file) {
     OptLib lib(game);
@@ -211,10 +208,10 @@ static int mode_play(Game& game, const std::string& workdir, const std::string& 
         v = next;
     }
 
-    // ── Post-play subgame summary ─────────────────────────────────────────
-    std::cout << "\n════════════════════════════════════════\n";
+    // Post-play subgame summary
+    std::cout << "\n========================================\n";
     std::cout << " Post-play Subgame Summary\n";
-    std::cout << "════════════════════════════════════════\n";
+    std::cout << "========================================\n";
     // std::cout << " Final subgame : A={"
     //           << [&](){ std::string s; for(int i=0; i<(int)policy.last_a_tilde().size(); i++) { if(i) s += ","; s+=std::to_string(policy.last_a_tilde()[i]);} return s.empty() ? "empty" : s; }() << "} G={"
     //           << [&](){ std::string s; for(int i=0; i<(int)policy.last_g_tilde().size(); i++) { if(i) s += ","; s+=std::to_string(policy.last_g_tilde()[i]);} return s.empty() ? "empty" : s; }() << "}\n";
@@ -264,7 +261,7 @@ static int mode_play(Game& game, const std::string& workdir, const std::string& 
         std::cout << "  " << (i + 1) << ": " << fmt_key(ranked[i].second) 
                   << " — " << ranked[i].first << " Eve steps\n";
     }
-    std::cout << "════════════════════════════════════════\n\n";
+    std::cout << "=====================================\n\n";
 
     return 0;
 }

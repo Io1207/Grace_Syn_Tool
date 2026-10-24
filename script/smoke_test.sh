@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # smoke_test.sh — End-to-end check (synthesis + 100 play steps) on a small
 #
-# Usage: ./script/smoke_test.sh [game_file]     (default: benchmarks/matching_pennies/arena.txt)
+# Usage: ./script/smoke_test.sh [game_file]     (default: benchmarks/fig2/arena.txt)
 
 set -euo pipefail
 
@@ -13,12 +13,9 @@ fail() { echo "[FAIL] $*" >&2; exit 1; }
 
 [[ -f "$GAME" ]] || fail "benchmark not found: $GAME"
 
-PLOT_FLAG=()
-if python3 -c "import pandas, numpy, matplotlib" >/dev/null 2>&1; then PLOT_FLAG=(--plot); fi
-
 echo "[smokeTest] game   : $GAME"
 echo "[smokeTest] output : $OUT"
-"$ROOT/script/run_pipeline.sh" "$GAME" --mode all --steps 500 --outdir "$OUT" ${PLOT_FLAG[@]+"${PLOT_FLAG[@]}"}
+"$ROOT/script/run_pipeline.sh" "$GAME" --mode all --steps 500 --outdir "$OUT" "}
 
 [[ -s "$OUT/winning_vertices.txt" ]] || fail "W was not computed (winning_vertices.txt missing/empty)"
 ls "$OUT"/A*/controller.bdd >/dev/null 2>&1 || fail "no subgame strategies were stored"
