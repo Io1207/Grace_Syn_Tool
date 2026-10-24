@@ -291,10 +291,7 @@ inline int run_synthesis_loop(Game& game, const SynthesisConfig& cfg, OptLib& li
         for (int tv : W) wp << tv << "\n";
         lib.set_winning_region(W);
 
-        {
-            const std::string full_dir = cfg.work_dir + "/" + first[0].label;
-            lib.store({0, 0}, cfg.controller_query_bin, full_dir + "/controller.bdd", full_dir + "/rabin.hoa");
-        }
+        lib.alias({0, 0}, first[0].key);
 
         if (cfg.verbose) std::cout << "[synth] |W| = " << W.size() << " transformed vertices\n";
         if (!W.count(lib.transformed_target(game.init)))

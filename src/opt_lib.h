@@ -43,10 +43,10 @@ inline std::string fmt_key(const SubgameKey& k) { return "A{" + fmt_mask(k.a) + 
 
 struct SubgameEntry {
     SubgameKey key;
-    std::unique_ptr<Eve> eve;
+    std::shared_ptr<Eve> eve;
 
     SubgameEntry() = default;
-    SubgameEntry(SubgameKey k, std::unique_ptr<Eve> e) : key(k), eve(std::move(e)) {}
+    SubgameEntry(SubgameKey k, std::shared_ptr<Eve> e) : key(k), eve(std::move(e)) {}
     SubgameEntry(const SubgameEntry&) = delete;
     SubgameEntry& operator=(const SubgameEntry&) = delete;
     SubgameEntry(SubgameEntry&&) = default;
@@ -69,6 +69,14 @@ class OptLib {
             auto eve = std::make_unique<Eve>(game_, controller_query_bin, bdd_file, hoa_file,
                                              play_id_, choose_id_, show_id_, ap_verts);
             entries_.insert_or_assign(k, SubgameEntry{k, std::move(eve)});
+        }
+
+        void alias(const SubgameKey& k, const SubgameKey& src) {
+            auto it = entries_.find(src);
+            if (it == entries_.end())
+                throw std::out_of_range("OptLib::alias — source " + fmt_key(src) + " not found");
+            std::shared_ptr<Eve> e = it->second.eve;   // copy first: safe even if k == src
+            entries_.insert_or_assign(k, SubgameEntry{k, std::move(e)});
         }
 
         void set_winning_region(const std::set<int>& W) { winning_region_ = W; }
