@@ -5,7 +5,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake git unzip curl ca-certificates \
         python3 python3-pip \
-        # Genie's install.sh: CUDD (autotools), Sylvan (GMP), cpphoafparser (wget + tar)
         pkg-config autoconf automake libtool libgmp-dev wget \
     && rm -rf /var/lib/apt/lists/*
 
