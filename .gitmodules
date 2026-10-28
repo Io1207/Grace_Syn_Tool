@@ -1,0 +1,6 @@
+[submodule "External_tools/fairsyn"]
+	path = External_tools/fairsyn
+	url = https://gitlab.com/Io1207/fairsyn.git
+[submodule "External_tools/genie"]
+	path = External_tools/genie
+	url = https://gitlab.com/kmallik/genie.git
