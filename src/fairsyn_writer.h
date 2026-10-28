@@ -10,7 +10,6 @@
 #include <stdexcept>
 #include <filesystem>
 #include <numeric>
-#include <thread>
 
 struct SubgameSpec {
     std::vector<int> a_indices;
@@ -47,7 +46,7 @@ inline VertexMap build_vertex_map(const Game& game, const std::set<int>& win_reg
     return vm;
 }
 
-inline void write_arena_file(const Game& game, [[maybe_unused]] const std::set<int>& win_region, const VertexMap& vm, std::ostream& out) {
+inline void write_arena_file(const Game& game, const std::set<int>& win_region, const VertexMap& vm, std::ostream& out) {
     const State_space* ss = game.get_state_space();
     const auto& post = ss->get_post();
 
@@ -77,7 +76,7 @@ inline void write_arena_file(const Game& game, [[maybe_unused]] const std::set<i
     }
 }
 
-inline void write_arena_file(const Game& game, [[maybe_unused]] const std::set<int>& win_region, const VertexMap& vm, const std::string& path) {
+inline void write_arena_file(const Game& game, const std::set<int>& win_region, const VertexMap& vm, const std::string& path) {
     std::ofstream f(path);
     if (!f) throw std::runtime_error("Cannot open arena file: " + path);
     write_arena_file(game, win_region, vm, f);
@@ -145,31 +144,29 @@ struct FairsynConfig {
     int verbose = 0;
     bool accelerated = false;
     int M = 10;
-    int n_workers  = 0;
+    int n_workers  = 36;
 };
 
 inline void write_config_json(const std::string& arena_file, const std::string& spec_file, const std::string& output_base,
                               const std::string& hoa_file, const std::string& controller_bdd_file,
-                              const std::string& winning_vertices_file, const FairsynConfig& fc, std::ostream& out) 
-{    
-    const int workers = fc.n_workers > 0 ? fc.n_workers : static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
-
+                              const std::string& winning_vertices_file,
+                              const FairsynConfig& fc, std::ostream& out) {
     out << "{\n";
-    out << "  \"arena_file\": \""  << arena_file  << "\",\n";
-    out << "  \"spec_file\": \""   << spec_file   << "\",\n";
+    out << "  \"arena_file\": \"" << arena_file << "\",\n";
+    out << "  \"spec_file\": \"" << spec_file << "\",\n";
     out << "  \"output_file\": \"" << output_base << "\",\n";
-    out << "  \"owl_path\": \""    << fc.owl_path << "\",\n";
+    out << "  \"owl_path\": \"" << fc.owl_path << "\",\n";
     if (!hoa_file.empty())
         out << "  \"hoa_file\": \"" << hoa_file << "\",\n";
     if (!controller_bdd_file.empty())
         out << "  \"controller_bdd_file\": \"" << controller_bdd_file << "\",\n";
     if (!winning_vertices_file.empty())
         out << "  \"winning_vertices_file\": \"" << winning_vertices_file << "\",\n";
-    out << "  \"ubdd_type\": "   << fc.ubdd_type << ",\n";
-    out << "  \"verbose\": "     << fc.verbose   << ",\n";
+    out << "  \"ubdd_type\": " << 2 << ",\n";
+    out << "  \"verbose\": " << fc.verbose<< ",\n";
     out << "  \"accelerated\": " << (fc.accelerated ? "true" : "false") << ",\n";
-    out << "  \"M\": "           << fc.M         << ",\n";
-    out << "  \"n_workers\": "   << workers      << "\n";
+    out << "  \"M\": " << fc.M << ",\n";
+    out << "  \"n_workers\":   " << fc.n_workers << "\n";
     out << "}\n";
 }
 
@@ -243,9 +240,8 @@ inline void write_obliging_arena(const Game& orig, std::ostream& out) {
         const auto& succs = old_post[u];
         if (!is_adam) {
             for (int v : succs) {
-                int dst = (old_owner[v] == 0) ? play_id[v] : choose_id[v];
-                new_post[play_id[u]].push_back(dst);
-                new_post[show_id[u]].push_back(dst);
+                new_post[play_id[u]].push_back(choose_id[v]);
+                new_post[show_id[u]].push_back(choose_id[v]);
             }
         } else {
             for (int v : succs) {
@@ -262,6 +258,11 @@ inline void write_obliging_arena(const Game& orig, std::ostream& out) {
         for (int w : new_post[v]) { if (!first) out << " "; out << w; first = false; }
         out << "\n";
     }
+    
+    // for (int v = 0; v < sz; v++) {
+    //     for (int w : new_post[v]) out << w << " ";
+    //     out << "-1\n";
+    // }
 }
 
 inline void write_obliging_arena(const Game& orig, const std::string& path) {
@@ -270,8 +271,9 @@ inline void write_obliging_arena(const Game& orig, const std::string& path) {
     write_obliging_arena(orig, f);
 }
 
-inline void write_obliging_spec (const Game& original, const GR1_spec& spec, const std::vector<int>& a_tilde, 
-                                 const std::vector<int>& g_tilde, const std::set<int>& w_verts, std::ostream& out) {
+inline void write_obliging_spec (const Game& original, const GR1_spec& spec,
+                                  const std::vector<int>& a_tilde, const std::vector<int>& g_tilde,
+                                  const std::set<int>& w_verts, std::ostream& out) {
     const int n = original.num_states;
     const auto& old_owner = original.get_state_space()->get_owner();
 
@@ -320,6 +322,7 @@ inline void write_obliging_spec (const Game& original, const GR1_spec& spec, con
         ap_verts.push_back(lift_all(spec.assumptions[i].states));
     }
 
+    // Add a{i}_all for assumptions NOT in a_tilde (they're not already added above)
     std::set<int> a_tilde_set(a_tilde.begin(), a_tilde.end());
     for (int i = 0; i < (int)spec.assumptions.size(); i++) {
         if (!a_tilde_set.count(i)) {
@@ -333,6 +336,8 @@ inline void write_obliging_spec (const Game& original, const GR1_spec& spec, con
         ap_verts.push_back(lift_all(spec.guarantees[i].states));
     }
 
+    // in_W AP: transformed-arena vertices in the full-game winning region
+    // Added only when w_verts is non-empty (i.e. for all subgames after line 1)
     if (!w_verts.empty()) {
         ap_names.push_back("in_W");
         std::set<int> wv(w_verts.begin(), w_verts.end());
@@ -384,12 +389,54 @@ inline void write_obliging_spec (const Game& original, const GR1_spec& spec, con
         b_or_psi = "(" + psi_full + ") | GF(in_play)";
     }
 
+    // G(in_W) is part of the STRONG requirement (Phi), not a separate top-level conjunct
     if (!w_verts.empty()) {
         if (phi == "true") phi = "G(in_W)";
-        else phi = "(" + phi + ") & G(in_W)";
+        else               phi = "(" + phi + ") & G(in_W)";
     }
 
     out << "(" << phi << ") & (" << b_or_psi << ")\n";
+    // for (int j = 0; j < (int)spec.guarantees.size(); j++) {
+    //     ap_names.push_back("g" + std::to_string(j) + "_all");
+    //     std::set<int> s;
+    //     for (int v : spec.guarantees[j].states) {
+    //         if (old_owner[v] == 0) s.insert(play_id[v]);
+    //         else s.insert(choose_id[v]);
+    //         s.insert(show_id[v]);
+    //     }
+    //     ap_verts.push_back(s);
+    // }
+
+    // for (int i = 0; i < (int)ap_names.size(); i++) {
+    //     if (i) out << " ";
+    //     out << ap_names[i];
+    // }
+    // out << "\n";
+
+    // for (int i = 0; i < (int)ap_names.size(); i++) {
+    //     out << ap_names[i];
+    //     for (int v : ap_verts[i]) out << " " << v;
+    //     out << "\n";
+    // }
+
+    // std::string phi, upsilon;
+
+    // for (int j = 0; j < (int)spec.guarantees.size(); j++) {
+    //     if (j) phi += " & ";
+    //     phi += "GF(g" + std::to_string(j) + "_all)";
+    // }
+    // if (phi.empty()) phi = "true";
+
+    // for (int i = 0; i < (int)spec.assumptions.size(); i++) {
+    //     if (i) upsilon += " & ";
+    //     upsilon += "GF(a" + std::to_string(i) + "_show)";
+    // }
+
+    // std::string b_or_upsilon;
+    // if (upsilon.empty()) { b_or_upsilon = "GF(in_play)"; } 
+    // else b_or_upsilon = "(GF(in_play) | (" + upsilon + "))";
+
+    // out << phi << " & " << b_or_upsilon << "\n";
 }
 
 inline void write_obliging_spec (const Game& original, const GR1_spec& spec,
@@ -400,16 +447,13 @@ inline void write_obliging_spec (const Game& original, const GR1_spec& spec,
     write_obliging_spec(original, spec, a_tilde, g_tilde, w_verts, f);
 }
 
-/***** FIXED: backward-compat overloads pass empty {} for w_verts (no G(in_W) constraint) *****/
-// Backward-compatible overload: no W constraint (used for the full-game call itself)
-inline void write_obliging_spec (const Game& original, const GR1_spec& spec,
-                                  const std::vector<int>& a_tilde, const std::vector<int>& g_tilde,
-                                  std::ostream& out) {
+inline void write_obliging_spec (const Game& original, const GR1_spec& spec, const std::vector<int>& a_tilde, 
+                                 const std::vector<int>& g_tilde, std::ostream& out) {
     write_obliging_spec(original, spec, a_tilde, g_tilde, {}, out);
 }
-inline void write_obliging_spec (const Game& original, const GR1_spec& spec,
-                                  const std::vector<int>& a_tilde, const std::vector<int>& g_tilde,
-                                  const std::string& path) {
+
+inline void write_obliging_spec (const Game& original, const GR1_spec& spec, const std::vector<int>& a_tilde,
+                                 const std::vector<int>& g_tilde, const std::string& path) {
     write_obliging_spec(original, spec, a_tilde, g_tilde, {}, path);
 }
 

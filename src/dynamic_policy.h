@@ -11,8 +11,9 @@
 #include <stdexcept>
 #include <algorithm>
 #include <iostream>
-#include <cmath>
-#include <iomanip>
+#include <fstream>
+#include <sstream>
+#include <optional>
 
 inline std::vector<int> active_assumptions(int v, const std::vector<GR1_conjunct>& assumptions) {
     std::vector<int> active;
@@ -22,19 +23,30 @@ inline std::vector<int> active_assumptions(int v, const std::vector<GR1_conjunct
     return active;
 }
 
+inline std::vector<std::vector<int>> all_subsets_of(int m) {
+    std::vector<std::vector<int>> result;
+    for (int mask = 0; mask < (1 << m); mask++) {
+        std::vector<int> s;
+        for (int i = 0; i < m; i++)
+            if (mask & (1 << i)) s.push_back(i);
+        result.push_back(s);
+    }
+    return result;
+}
+
 struct DynamicPolicyParams {
     double alpha = 0.9;
-    double alpha_prime = -1.0; // if negative, use alpha_prime = alpha
+    double alpha_prime = 0.5;
     double lambda = 0.9;
-    double lambda_prime = -1.0; // if negative, use lambda_prime = lambda
+    double lambda_prime = 0.9;
     unsigned seed = 42;
     int k = 1;
-    double eps = 1e-9;
 };
 
 struct Candidate {
     double prob;
-    Mask b;
+    std::vector<int> a_idx;
+    std::vector<int> g_idx;
 };
 
 struct AdamPhase {
@@ -77,12 +89,12 @@ public:
                 int s, e;
                 iss >> cur_phase->name >> s >> e;
                 cur_phase->start_step = s;
-                cur_phase->end_step   = e;
+                cur_phase->end_step = e;
             } else {
                 int from = std::stoi(first), to;
                 iss >> to;
-                if (has_phases && cur_phase)    cur_phase->transitions[from] = to;
-                else    global_transitions_[from] = to;
+                if (has_phases && cur_phase) cur_phase->transitions[from] = to;
+                else  global_transitions_[from] = to;
             }
         }
         std::cerr << "[adam] Loaded strategy: " << (has_phases ? std::to_string(phases_.size()) + " phases" : 
@@ -117,44 +129,20 @@ class DynamicPolicy {
 
         DynamicPolicy(Game& game, OptLib& lib, Params p = Params{}) : game_(game), lib_(lib), params_(p), rng_(p.seed)
         {
-            if (!(p.eps > 0.0 && p.eps < 0.5)) throw std::invalid_argument("DynamicPolicy: eps must be in (0, 0.5)");
+            int m = game.n_a;
+            int n_g = game.n_g;
 
-            const int m = game.n_a;
             w_A_.assign(m, 1.0);
             alpha_A_.assign(m, p.alpha);
-
-            if (params_.alpha_prime  < 0) params_.alpha_prime  = params_.alpha;
-            if (params_.lambda_prime < 0) params_.lambda_prime = params_.lambda;
-            for (double x : {params_.alpha, params_.lambda, params_.alpha_prime, params_.lambda_prime})
-                if (!(x > 0.0 && x < 1.0))
-                    throw std::invalid_argument("DynamicPolicy: alpha/lambda values must be in (0, 1)");
-
             w_union_ = 1.0;
-            alpha_union_ = params_.alpha_prime;
+            alpha_union_ = p.alpha_prime;
 
-            std::cerr << "[info] monitors: alpha=" << params_.alpha << " lambda=" << params_.lambda;
-            if (params_.alpha_prime != params_.alpha || params_.lambda_prime != params_.lambda)
-                std::cerr << "  (union override: alpha'=" << params_.alpha_prime
-                          << " lambda'=" << params_.lambda_prime << " — deviates from Alg. 3)";
-            std::cerr << "  k=" << params_.k << " eps=" << params_.eps << "\n";
+            all_a_subsets_ = all_subsets_of(m);
 
-            n_subsets_ = Mask(1) << m;
-            full_a_ = full_mask(m);
+            full_a_.resize(m); std::iota(full_a_.begin(), full_a_.end(), 0);
+            full_g_.resize(n_g); std::iota(full_g_.begin(), full_g_.end(), 0);
 
-            for (const auto& key : lib.all_keys()) subgame_states_[key] = {};
-            init_subgame_states();
-            check_initial_q_convention();
-
-            // Lambda priority chain for every B in A (Algorithm 1 order)
-            chain_for_B_.resize(n_subsets_);
-            for (Mask b = 0; b < n_subsets_; b++) {
-                chain_for_B_[b] = build_chain(b);
-                if (chain_for_B_[b].empty())
-                    throw std::runtime_error("No strategy for B={" + fmt_mask(b) + "} — was A{empty}_G{empty} synthesized?");
-            }
-
-            steps_since_resample_ = 0;
-            current_candidate_ = {1.0, full_a_};
+            reset_active();
         }
 
         void load_adam_strategy(const std::string& path) { adam_strat_.load(path); }
@@ -162,50 +150,32 @@ class DynamicPolicy {
         void set_csv(const std::string& path) {
             csv_.open(path);
             if (!csv_) throw std::runtime_error("Cannot open CSV: " + path);
-            csv_ << std::setprecision(10);
-            csv_ << "step,player,from_v,to_v,b_sub,a_sub,g_sub,w_eta";
-            for (int i = 0; i < game_.n_a; i++) csv_ << ",w_A" << i;
-
-            for (Mask b = 0; b < n_subsets_; b++) csv_ << ",p_" << fmt_mask(b, "|");
-
-            for (int j = 0; j < game_.n_g; j++) csv_ << ",in_G" << j;
+            csv_ << "step,from_v,to_v,a_sub,g_sub,w_empty";
+            for (int i = 0; i < (int)game_.spec.assumptions.size(); i++)
+                csv_ << ",w_A" << i;
+            for (int j = 0; j < (int)game_.spec.guarantees.size(); j++)
+                csv_ << ",in_G" << j;
             csv_ << "\n";
         }
 
         int step(int v, int t = 0) {
-            State_space* ss     = game_.get_state_space();
-            const auto& owner   = ss->get_owner();
-            const auto& assums  = game_.spec.assumptions;
-            last_step_eve_ = false;
+            State_space* ss = game_.get_state_space();
+            const auto& owner = ss->get_owner();
+            const auto& assums = game_.spec.assumptions;
 
-            // Liveness monitors 
+            // Liveness monitors
             for (int i = 0; i < (int)assums.size(); i++) {
-                if (assums[i].states.count(v)) { w_A_[i] = 1.0; alpha_A_[i] *= params_.lambda; }
-                else w_A_[i] *= (1.0 - alpha_A_[i]);
+                if (assums[i].states.count(v)) {
+                    w_A_[i] = 1.0; alpha_A_[i] *= params_.lambda;
+                } else {
+                    w_A_[i] *= (1.0 - alpha_A_[i]);
+                }
             }
-
             bool v_in_any_A = false;
             for (const auto& a : assums)
                 if (a.states.count(v)) { v_in_any_A = true; break; }
             if (v_in_any_A) { w_union_ = 1.0; alpha_union_ *= params_.lambda_prime; }
-            else w_union_ *= (1.0 - alpha_union_);
-
-            // Advance (mode,q) of one subgame along the real history
-            auto advance_state = [&](SubgameState& s, const SubgameKey& key, int orig_u, bool u_is_adam, int real_v) {
-                if (u_is_adam) {
-                    ShadowGuess sg = lib_.shadow_guess(key, orig_u, s.q);
-                    if (sg.v_show == -1 || real_v != sg.v_show) {
-                        s.mode  = Mode::PLAY;
-                        s.q     = lib_.q_after_play_move(key, real_v, s.q);
-                    } else {
-                        s.mode  = Mode::SHOW;
-                        s.q     = sg.q_show;
-                    }
-                } else {
-                    s.q     = lib_.hoa_step(key, s.q, lib_.transformed_target(real_v));
-                    s.mode  = Mode::PLAY;
-                }
-            };
+            else              w_union_ *= (1.0 - alpha_union_);
 
             // ADAM'S TURN
             if (owner[v] == 1) {
@@ -216,109 +186,119 @@ class DynamicPolicy {
                     int chosen = adam_strat_.query(v, t);
                     if (chosen != -1) {
                         bool ok = false;
-                        for (int w : succs) if (w == chosen) { ok = true; break; }
+                        for (int w : succs) if (w==chosen){ok=true;break;}
                         if (ok) real_v = chosen;
                         else std::cerr << "[adam] Warning: " << v << "->" << chosen << " invalid, using succs[0]\n";
                     }
                 }
-                for (auto& [key, s] : subgame_states_)
-                    advance_state(s, key, v, true, real_v);
                 
-                write_csv_row(t, false, v, real_v);
-                
+                if (have_active_) {
+                    try {
+                        ShadowGuess sg = lib_.shadow_guess(v, active_.q, active_key_.first, active_key_.second);
+                        if (sg.v_show == -1 || real_v != sg.v_show) {
+                            active_.mode = Mode::PLAY;
+                            active_.q    = lib_.q_after_play_move(real_v, active_.q, active_key_.first, active_key_.second);
+                        } else {
+                            active_.mode = Mode::SHOW;
+                            active_.q = sg.q_show;
+                        }
+                    } catch (...) { }
+                }
                 return real_v;
             }
 
-            // EVE'S TURN 
-            if (steps_since_resample_ == 0) {
-                current_candidate_ = sample_subgame(t);
-                steps_since_resample_ = params_.k;
+            // EVE'S TURN
+            if (steps_since_resample_ == 0 || !have_B_) {
+                current_B_ = sample_B(t);
+                have_B_ = true;
+                steps_since_resample_ = std::max(1, params_.k);
             }
             steps_since_resample_--;
 
-            // first strategy in B's chain that is winning at (v, q_sub)
-            const auto& chain = chain_for_B_[current_candidate_.b];
-            int next_v = -1;
-            SubgameKey used{};
-            for (const auto& key : chain) {
-                SubgameState& s = subgame_states_.at(key);
-                int q_out = s.q;
-                int cand = lib_.query(key, v, s.q, s.mode, q_out);
-                if (cand != -1) {
-                    // Sanity check: BDD's next_q must equal del(q, label(target)), the
-                    // convention advance_state relies on for non-deployed subgames
-                    int q_hoa = lib_.hoa_step(key, s.q, lib_.transformed_target(cand));
-                    if (q_hoa != q_out)
-                        std::cerr << "[warn] q convention mismatch at " << fmt_key(key)
-                                << ": BDD next_q=" << q_out << ", HOA step=" << q_hoa
-                                << " (v=" << v << " -> " << cand << ")\n";
-                    next_v = cand; s.q = q_out; ; s.mode = Mode::PLAY; used = key;
-                    break;
-                }
-            }
+            SubgameKey2 target = lookup(v, current_B_);
+            if (!have_active_ || target != active_key_) activate(target);
+
+            int next_v = -1, q_out = active_.q;
+            try {
+                next_v = lib_.query(v, active_.q, active_.mode, active_key_.first, active_key_.second, q_out);
+            } catch (...) { next_v = -1; }
+
             if (next_v == -1) {
-                std::cerr << "[error] Lambda(v=" << v << ", B={" << fmt_mask(current_candidate_.b) <<  "}) undefined — v no in W or automaton state desynced\n";
-                return -1;
+                activate(active_key_);
+                try {
+                    next_v = lib_.query(v, active_.q, active_.mode, active_key_.first, active_key_.second, q_out);
+                } catch (...) { next_v = -1; }
+                if (next_v == -1) {
+                    activate({full_a_, full_g_});
+                    try {
+                        next_v = lib_.query(v, active_.q, active_.mode, active_key_.first, active_key_.second, q_out);
+                    } catch (...) { next_v = -1; }
+                }
+                if (next_v == -1) { std::cerr << "[error] Full fallback -1 at v=" << v << "\n"; return -1; }
             }
+            active_.q = q_out;
 
-            for (auto& [key, s] : subgame_states_) {
-                if (key == used) continue;
-                advance_state(s, key, v, false, next_v);
+            last_a_sub_ = active_key_.first;
+            last_g_sub_ = active_key_.second;
+
+            if (csv_.is_open()) {
+                csv_ << t << "," << v << "," << next_v << ","
+                     << format_vector(last_a_sub_) << "," << format_vector(last_g_sub_)
+                     << "," << w_union_ << "," << (1.0-w_union_);
+                for (int i=0;i<(int)assums.size();i++) csv_ << "," << w_A_[i];
+                for (int j=0;j<(int)game_.spec.guarantees.size();j++)
+                    csv_ << "," << (int)(game_.spec.guarantees[j].states.count(next_v)>0);
+                csv_ << "\n";
             }
-
-            last_used_ = used;
-            last_b_ = current_candidate_.b;
-            last_step_eve_ = true;
-
-            write_csv_row(t, true, v, next_v);
-
             return next_v;
         }
 
         void reset() {
-            const int m = static_cast<int>(game_.spec.assumptions.size());
+            int m = static_cast<int>(game_.spec.assumptions.size());
             w_A_.assign(m, 1.0);
             alpha_A_.assign(m, params_.alpha);
             w_union_ = 1.0;
             alpha_union_ = params_.alpha_prime;
-            init_subgame_states();
             steps_since_resample_ = 0;
-            current_candidate_ = {1.0, full_a_};
-            last_used_ = {};
-            last_b_ = 0;
-            last_step_eve_ = false;
+            have_B_ = false;
+            reset_active();
+            last_a_sub_.clear();
+            last_g_sub_.clear();
         }
 
         double w_empty() const { return 1 - w_union_; }
         double w_union() const { return w_union_; }
         double w_A(int i) const { return w_A_.at(i); }
-        const SubgameKey& last_used() const { return last_used_; }
-        Mask last_b() const { return last_b_; }
-        bool last_step_was_eve() const { return last_step_eve_; }
+        const std::vector<int>& last_a_tilde() const { return last_a_sub_; }
+        const std::vector<int>& last_g_tilde() const { return last_g_sub_; }
 
-        struct SubsetProb { Mask a_subset; double prob; };
+        struct SubsetProb { std::vector<int> a_subset; double prob; };
         std::vector<SubsetProb> compute_subset_probs(int t) const {
-            auto probs = subset_probs(t);
-            std::vector<SubsetProb> out;
-            out.reserve(n_subsets_);
-            for (Mask b = 0; b < n_subsets_; b++) out.push_back({b, probs[b]});
-            std::sort(out.begin(), out.end(),
-                      [](const SubsetProb& x, const SubsetProb& y) { return x.prob > y.prob; });
-            return out;
+            std::vector<double> p = subset_probabilities(t);
+            std::vector<SubsetProb> result;
+            for (int si = 0; si < (int)all_a_subsets_.size(); si++)
+                result.push_back({all_a_subsets_[si], p[si]});
+            std::sort(result.begin(), result.end(),
+                      [](const SubsetProb& a, const SubsetProb& b){ return a.prob > b.prob; });
+            return result;
         }
 
-        std::string debug_state(const SubgameKey& k) const {
-            auto it = subgame_states_.find(k);
-            if (it == subgame_states_.end()) return "NOT_FOUND";
-            return std::string(it->second.mode == Mode::PLAY ? "PLAY" : "SHOW") + ",q=" + std::to_string(it->second.q);
+        std::string debug_state(const std::vector<int>& a, const std::vector<int>& g) const {
+            if (!have_active_ || active_key_.first != a || active_key_.second != g) return "NOT_ACTIVE";
+            return std::string(active_.mode == Mode::PLAY ? "PLAY" : "SHOW") + ",q=" + std::to_string(active_.q);
         }
 
         void debug_dump_states(std::ostream& out) const {
-            for (const auto& [key, s] : subgame_states_)
-                out << "  " << fmt_key(key) << " " << (s.mode == Mode::PLAY ? "PLAY" : "SHOW") << " q=" << s.q << "\n";
+            if (!have_active_) { out << "  (no active strategy)\n"; return; }
+            out << "  A={" << format_vector_plain(active_key_.first) << "} G={"
+                << format_vector_plain(active_key_.second) << "} "
+                << (active_.mode==Mode::PLAY?"PLAY":"SHOW") << " q=" << active_.q << "\n";
         }
 
     private:
+        struct SubgameState { Mode mode = Mode::PLAY; int q = 0; };
+        using SubgameKey2 = std::pair<std::vector<int>,std::vector<int>>;
+
         Game& game_;
         OptLib& lib_;
         Params params_;
@@ -328,133 +308,86 @@ class DynamicPolicy {
         std::vector<double> w_A_;
         std::vector<double> alpha_A_;
 
-        Mask n_subsets_ = 1;
-        Mask full_a_ = 0;
+        std::vector<std::vector<int>> all_a_subsets_;
+        std::vector<int> full_a_;
+        std::vector<int> full_g_;
 
-        // Per-subgame memory: (mode in {PLAY,SHOW}, q) — Theorem 3 memory-2 bound
-        struct SubgameState { Mode mode = Mode::PLAY; int q = 0; };
-        std::map<SubgameKey, SubgameState> subgame_states_;
+        bool have_active_ = false;
+        SubgameKey2 active_key_;
+        SubgameState active_;
 
-        // chain_for_B_[B] = Lambda priority chain (Algorithm 1 order)
-        std::vector<std::vector<SubgameKey>> chain_for_B_;
+        std::vector<int> current_B_;
+        bool have_B_ = false;
+        int steps_since_resample_ = 0;
 
-        SubgameKey last_used_{};
-        Mask last_b_ = 0;
-        bool last_step_eve_ = false;
-
-        int steps_since_resample_;
-        Candidate current_candidate_;
+        std::vector<int> last_a_sub_;
+        std::vector<int> last_g_sub_;
 
         AdamStrategy adam_strat_;
         std::ofstream csv_;
         std::mt19937 rng_;
 
-        void init_subgame_states() {
-            const int tv0 = lib_.transformed_target(game_.init);
-            for (auto& [key, s] : subgame_states_) {
-                s.mode = Mode::PLAY;
-                s.q    = lib_.hoa_step(key, lib_.hoa_start_state(key), tv0);
+        void reset_active() {
+            have_active_ = false;
+            active_ = SubgameState{};
+            active_key_ = {full_a_, full_g_};
+        }
+
+        void activate(const SubgameKey2& key) {
+            active_key_ = key;
+            active_ = SubgameState{};
+            try { active_.q = lib_.hoa_start_state(key.first, key.second); } catch (...) { active_.q = 0; }
+            have_active_ = true;
+        }
+
+        SubgameKey2 lookup(int v, const std::vector<int>& B) const {
+            auto k = lib_.best_for(v, B);
+            if (k) return {k->a_indices, k->g_indices};
+            return {full_a_, full_g_};
+        }
+
+        std::vector<double> subset_probabilities(int t) const {
+            auto odds = [](double w_tilde) -> double {
+                w_tilde = std::max(w_tilde, -1.0 + 1e-6);
+                if (w_tilde >= 1.0 - 1e-12) return 1e9;
+                return (1.0 + w_tilde) / (1.0 - w_tilde);
+            };
+            double gamma_t = 1.0 / std::log(3.0 + static_cast<double>(t));
+            double w_empty = std::min(1.0 - 2.0 * w_union_, 1.0 - gamma_t);
+
+            std::vector<double> w_odds(all_a_subsets_.size(), 0.0);
+            for (int si = 0; si < (int)all_a_subsets_.size(); si++) {
+                const auto& subset = all_a_subsets_[si];
+                if (subset.empty()) { w_odds[si] = odds(w_empty); continue; }
+                double w_min_in = 1.0;
+                for (int i : subset) w_min_in = std::min(w_min_in, w_A_[i]);
+                double w_max_out = 0.0;
+                for (int i = 0; i < (int)w_A_.size(); i++)
+                    if (std::find(subset.begin(), subset.end(), i) == subset.end())
+                        w_max_out = std::max(w_max_out, w_A_[i]);
+                w_odds[si] = odds(w_min_in - std::max(w_max_out, gamma_t));
             }
-        }
-
-        void check_initial_q_convention() const {
-            const SubgameKey full{full_a_, full_mask(game_.n_g)};
-            const auto& owner = game_.get_state_space()->get_owner();
-            if (!lib_.has(full) || owner[game_.init] != 0) return;
-
-            const int q_start = lib_.hoa_start_state(full);
-            const int q_read = lib_.hoa_step(full, q_start, lib_.transformed_target(game_.init));
-            int dummy;
-            const bool mv_start = lib_.query(full, game_.init, q_start, Mode::PLAY, dummy) != -1;
-            const bool mv_read = lib_.query(full, game_.init, q_read,  Mode::PLAY, dummy) != -1;
-
-            std::cerr << "[info] init-q check (" << fmt_key(full) << ", v0=" << game_.init << "): "
-                    << "q=Start(" << q_start << ") " << (mv_start ? "has move" : "NO move") << ", "
-                    << "q=del(Start,v0)(" << q_read << ") " << (mv_read ? "has move" : "NO move") << "\n";
-
-            if (!mv_read)
-                std::cerr << "[warn] BDD has no move at (v0, del(Start,v0)) — either v0 not in W or fairsyn convention mismatches";
-        }
-
-        // Library keys usable for B: A_tilde in B only (fewer assumptions = harder
-        // game, so sound when B holds). Order: G_tilde by decreasing size, then A_tilde
-        // by increasing size; ties broken by mask value for determinism.
-        std::vector<SubgameKey> build_chain(Mask b) const {
-            const int n_g = game_.n_g;
-            auto pc = [](Mask x) { return __builtin_popcount(x); };
-
-            std::vector<Mask> a_cands;
-            for (Mask sub = b; ; sub = (sub - 1) & b) {
-                a_cands.push_back(sub);
-                if (sub == 0) break;
-            }
-            std::sort(a_cands.begin(), a_cands.end(),
-                      [&](Mask x, Mask y) { return pc(x) != pc(y) ? pc(x) < pc(y) : x < y; });
-
-            std::vector<Mask> g_cands;
-            for (Mask g = 0; g < (Mask(1) << n_g); g++) g_cands.push_back(g);
-            std::sort(g_cands.begin(), g_cands.end(),
-                      [&](Mask x, Mask y) { return pc(x) != pc(y) ? pc(x) > pc(y) : x < y; });
-
-            std::vector<SubgameKey> chain;
-            for (Mask g : g_cands)
-                for (Mask a : a_cands)
-                    if (lib_.has({a, g})) chain.push_back({a, g});
-            return chain;
-        }
-
-        static double odds(double w) { return (1.0 + w) / (1.0 - w); }
-
-        double clip(double w) const { return std::clamp(w, params_.eps, 1.0 - params_.eps); }
-
-        // Intermediate weight w_tilde_B
-        double w_tilde(Mask b, double gamma_t) const {
-            if (b == 0) return std::min(1.0 - 2.0 * clip(w_union_), 1.0 - gamma_t);
-            const int m = static_cast<int>(w_A_.size());
-            double w_min_in = 1.0, w_max_out = 0.0;
-            for (int i = 0; i < m; i++) {
-                const double w = clip(w_A_[i]);
-                if ((b >> i) & 1) w_min_in  = std::min(w_min_in,  w);
-                else w_max_out = std::max(w_max_out, w);
-            }
-            return w_min_in - std::max(w_max_out, gamma_t);
-        }
-
-        void write_csv_row(int t, bool eve, int v, int next_v) {
-            if (!csv_.is_open()) return;
-            csv_ << t << "," << (eve ? "E" : "A") << "," << v << "," << next_v << ",";
-
-            if (eve) csv_ << fmt_mask(last_b_, "|") << "," << fmt_mask(last_used_.a, "|") << "," << fmt_mask(last_used_.g, "|");
-            else csv_ << ",,";
-
-            csv_ << "," << w_union_;
-            for (double w : w_A_) csv_ << "," << w;
-
-            for (double p : subset_probs(t)) csv_ << "," << p;
-
-            for (const auto& g : game_.spec.guarantees) csv_ << "," << (g.states.count(next_v) ? 1 : 0);
-
-            csv_ << "," << clip(w_union_);
-            for (double w : w_A_) csv_ << "," << clip(w);
-
-            csv_ << "\n";
-        }
-
-        // p_B for every B, indexed by mask (Eqs. 6–7)
-        std::vector<double> subset_probs(int t) const {
-            const double gamma_t = 1.0 / std::log(3.0 + static_cast<double>(t));
-            std::vector<double> p(n_subsets_);
             double denom = 0.0;
-            for (Mask b = 0; b < n_subsets_; b++) { p[b] = odds(w_tilde(b, gamma_t)); denom += p[b]; }
+            for (double w : w_odds) denom += w;
             if (denom < 1e-15) denom = 1e-15;
-            for (auto& x : p) x /= denom;
-            return p;
+            for (double& w : w_odds) w /= denom;
+            return w_odds;
         }
 
-        PolicyCandidate sample_subgame(int t) {
-            auto probs = subset_probs(t);
+        std::vector<int> sample_B(int t) {
+            std::vector<double> probs = subset_probabilities(t);
             std::discrete_distribution<int> dist(probs.begin(), probs.end());
-            Mask b = static_cast<Mask>(dist(rng_));
-            return {probs[b], b};
+            return all_a_subsets_[dist(rng_)];
+        }
+
+        static std::string format_vector_plain(const std::vector<int>& v) {
+            std::string s;
+            for (size_t i = 0; i < v.size(); i++) { if (i) s += ","; s += std::to_string(v[i]); }
+            return s;
+        }
+
+        static std::string format_vector (const std::vector<int>& v) {
+            if (v.empty()) return "empty";
+            return format_vector_plain(v);
         }
 };

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # smoke_test.sh — End-to-end check (synthesis + 100 play steps) on a small
 #
-# Usage: ./script/smoke_test.sh [game_file]     (default: benchmarks/fig2/arena.txt)
+# Usage: ./script/smoke_test.sh [game_file]
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # artifact root
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GAME="${1:-$ROOT/benchmarks/matching_pennies/arena.txt}"
 OUT="$(mktemp -d)/smoke"
 

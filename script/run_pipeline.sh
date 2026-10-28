@@ -40,25 +40,35 @@ FAIRSYN="${GRACE_FAIRSYN:-$ROOT/External_tools/fairsyn/build/bin/controller_synt
 CTRL_QUERY="${GRACE_CTRL_QUERY:-$ROOT/External_tools/fairsyn/build/bin/controller_query}"
 OWL_PATH="${GRACE_OWL:-$ROOT/External_tools/owl/owl-linux-musl-amd64-21.0/bin}"
 
+# Locate compiled binary (grace or legacy main)
+if   [[ -x "$SCRIPT_DIR/grace" ]];    then BIN="$SCRIPT_DIR/grace"
+elif [[ -x "$SCRIPT_DIR/main" ]];     then BIN="$SCRIPT_DIR/main"
+elif [[ -x "$SCRIPT_DIR/../grace" ]]; then BIN="$(cd "$SCRIPT_DIR/.." && pwd)/grace"
+elif [[ -x "$SCRIPT_DIR/../main" ]];  then BIN="$(cd "$SCRIPT_DIR/.." && pwd)/main"
+else
+    echo "[error] Cannot find compiled binary (grace or main). Run 'make' first." >&2
+    exit 1
+fi
+ 
+# Defaults
 MODE="all"
 STEPS=500
 K=1
-ALPHA=0.5
-ALPHA_PRIME=""
+ALPHA=0.9
+ALPHA_PRIME=0.5
 LAMBDA=0.9
-LAMBDA_PRIME=""
-EPS=""
+LAMBDA_PRIME=0.9
 SEED=42
+DEBUG_STATES=0
 TRACE=""
-AINF=""
 PARALLEL=""
 SKIP_DELETE=""
+NO_PRUNE=""
 PLOT=0
 OUTDIR=""
 GAME_FILE=""
-UBDD_TYPE=2
-N_WORKERS=""
-
+UBDD_TYPE=0
+ 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --mode)         MODE="$2";             shift 2 ;;
@@ -71,18 +81,17 @@ while [[ $# -gt 0 ]]; do
         --alpha-prime)  ALPHA_PRIME="$2";      shift 2 ;;
         --lambda)       LAMBDA="$2";           shift 2 ;;
         --lambda-prime) LAMBDA_PRIME="$2";     shift 2 ;;
-        --eps)          EPS="$2";              shift 2 ;;
         --seed)         SEED="$2";             shift 2 ;;
+        --debug-states) DEBUG_STATES="$2";     shift 2 ;;
         --trace)        TRACE="$2";            shift 2 ;;
-        --ainf)         AINF="$2";             shift 2 ;;
         --parallel)     PARALLEL="--parallel"; shift   ;;
         --skip-delete)  SKIP_DELETE="--skip-delete"; shift ;;
+        --no-prune)     NO_PRUNE="--no-prune"; shift ;;
         --plot)         PLOT=1;                shift   ;;
         --outdir)       OUTDIR="$2";           shift 2 ;;
         --ubdd-type)    UBDD_TYPE="$2";        shift 2 ;;
-        --n-workers)    N_WORKERS="$2";        shift 2 ;;
         --help|-h)
-            sed -n '2,52p' "$0" | grep '^#' | sed 's/^# \?//'; exit 0 ;;
+            sed -n '2,40p' "$0" | grep '^#' | sed 's/^# \?//'; exit 0 ;;
         -*) echo "[error] Unknown option: $1" >&2; exit 1 ;;
         *)
             if [[ -z "$GAME_FILE" ]]; then GAME_FILE="$1"
@@ -90,52 +99,46 @@ while [[ $# -gt 0 ]]; do
             shift ;;
     esac
 done
-
-if   [[ -x "$ROOT/build/bin/grace" ]]; then BIN="$ROOT/build/bin/grace"
-elif [[ -x "$ROOT/src/main" ]]; then BIN="$ROOT/src/main"   # legacy Makefile build
-else
-    echo "[error] Cannot find grace binary. Run ./build/build_all.sh first or build using makeile in src" >&2
-    exit 1
-fi
-
+ 
 [[ -z "$GAME_FILE" ]] && { echo "[error] No game file specified." >&2; exit 1; }
 [[ ! -f "$GAME_FILE" ]] && { echo "[error] File not found: $GAME_FILE" >&2; exit 1; }
-
+ 
 case "$MODE" in
     transform|synth|play|all) ;;
     *) echo "[error] Unknown mode '$MODE'" >&2; exit 1 ;;
 esac
-
+ 
+# Validate required binaries early so we fail clearly before doing any work
 if [[ "$MODE" == "synth" || "$MODE" == "all" ]]; then
-    if [[ ! -x "$FAIRSYN" ]]; then
+    [[ ! -x "$FAIRSYN" ]] && {
         echo "[error] controller_synthesis not found or not executable: $FAIRSYN" >&2
-        echo "        Run ./External_tools/setup.sh, set GRACE_FAIRSYN, or pass --fairsyn" >&2
+        echo "        Edit FAIRSYN= at the top of this script or pass --fairsyn" >&2
         exit 1
-    fi
-fi
-if [[ "$MODE" == "synth" || "$MODE" == "play" || "$MODE" == "all" ]]; then
-    if [[ ! -x "$CTRL_QUERY" ]]; then
+    }
+    [[ ! -x "$CTRL_QUERY" ]] && {
         echo "[error] controller_query not found or not executable: $CTRL_QUERY" >&2
-        echo "        Run ./External_tools/setup.sh, set GRACE_CTRL_QUERY, or pass --ctrl-query" >&2
+        echo "        Edit CTRL_QUERY= at the top of this script or pass --ctrl-query" >&2
         exit 1
-    fi
+    }
 fi
-
+if [[ "$MODE" == "play" ]]; then
+    [[ ! -x "$CTRL_QUERY" ]] && {
+        echo "[error] controller_query not found or not executable: $CTRL_QUERY" >&2
+        exit 1
+    }
+fi
+ 
+STEM="$(basename "$GAME_FILE" .txt)"
 GAME_DIR="$(cd "$(dirname "$GAME_FILE")" && pwd)"
-if [[ "$(basename "$GAME_FILE")" == "arena.txt" ]]; then
-    DEFAULT_OUT="$GAME_DIR/out"
-else
-    DEFAULT_OUT="$GAME_DIR/$(basename "$GAME_FILE" .txt)"
-fi
-OUTDIR="${OUTDIR:-$DEFAULT_OUT}"
+OUTDIR="${OUTDIR:-$GAME_DIR/$STEM}"
 mkdir -p "$OUTDIR"
 OUTDIR="$(cd "$OUTDIR" && pwd)"
-
+ 
 CSV="$OUTDIR/play.csv"
 PLAY_LOG="$OUTDIR/play.log"
-
+ 
 echo "========================================================"
-echo " Grace — Adaptive GR(1) Synthesis Pipeline"
+echo " Grace — Obliging GR(1) Synthesis Pipeline"
 echo "========================================================"
 echo " Game        : $GAME_FILE"
 echo " Mode        : $MODE"
@@ -144,34 +147,35 @@ echo " Binary      : $BIN"
 [[ -n "$PARALLEL" ]] && echo " Parallel    : yes"
 echo "========================================================"
 echo ""
-
+ 
+# ── Transform ─────────────────────────────────────────────────────────────────
 run_transform() {
     echo "[transform] Writing obliging arena and full spec..."
     "$BIN" "$GAME_FILE" transform --output "$OUTDIR"
     echo ""
 }
-
+ 
+# ── Synthesis ──────────────────────────────────────────────────────────────────
 run_synth() {
     local SYNTH_LOG="$OUTDIR/synth.log"
     echo "[synth] Running synthesis loop (BDD mode)..."
     echo "[synth] Output logged to: $SYNTH_LOG"
-    local SYNTH_ARGS=(
-        "$GAME_FILE" synth
-        --fairsyn          "$FAIRSYN"
-        --controller-query "$CTRL_QUERY"
-        --owl-path         "$OWL_PATH"
-        --workdir          "$OUTDIR"
-        --ubdd-type        "$UBDD_TYPE"
-    )
-    if [[ -n "$PARALLEL"    ]]; then SYNTH_ARGS+=("$PARALLEL");              fi
-    if [[ -n "$SKIP_DELETE" ]]; then SYNTH_ARGS+=("$SKIP_DELETE");           fi
-    if [[ -n "$N_WORKERS"   ]]; then SYNTH_ARGS+=(--n-workers "$N_WORKERS"); fi
-    "$BIN" "${SYNTH_ARGS[@]}" 2>&1 | tee "$SYNTH_LOG"
+    "$BIN" "$GAME_FILE" synth \
+        --fairsyn          "$FAIRSYN" \
+        --controller-query "$CTRL_QUERY" \
+        --owl-path         "$OWL_PATH" \
+        --workdir          "$OUTDIR" \
+        $PARALLEL \
+        --ubdd-type        "$UBDD_TYPE" \
+        $SKIP_DELETE \
+        $NO_PRUNE \
+        2>&1 | tee "$SYNTH_LOG"
     echo ""
 }
-
+ 
+# ── Play ───────────────────────────────────────────────────────────────────────
 run_play() {
-    #checking at least one BDD exists
+    # Check that at least one subgame BDD exists
     local found=0
     for d in "$OUTDIR"/A*/; do
         [[ -f "$d/controller.bdd" ]] && { found=1; break; }
@@ -182,45 +186,44 @@ run_play() {
         echo "          $0 $GAME_FILE --mode synth" >&2
         exit 1
     fi
-
+ 
     echo "[play] Running Algorithm 3 for $STEPS steps..."
-    local PLAY_ARGS=(
+    PLAY_ARGS=(
         "$GAME_FILE" play
         --workdir          "$OUTDIR"
         --controller-query "$CTRL_QUERY"
         --steps            "$STEPS"
         --k                "$K"
         --alpha            "$ALPHA"
+        --alpha-prime      "$ALPHA_PRIME"
         --lambda           "$LAMBDA"
+        --lambda-prime     "$LAMBDA_PRIME"
         --seed             "$SEED"
+        --debug-states     "$DEBUG_STATES"
         --csv              "$CSV"
     )
-    if [[ -n "$ALPHA_PRIME"  ]]; then PLAY_ARGS+=(--alpha-prime  "$ALPHA_PRIME");  fi
-    if [[ -n "$LAMBDA_PRIME" ]]; then PLAY_ARGS+=(--lambda-prime "$LAMBDA_PRIME"); fi
-    if [[ -n "$EPS"          ]]; then PLAY_ARGS+=(--eps          "$EPS");          fi
-    if [[ -n "$TRACE"        ]]; then PLAY_ARGS+=(--trace        "$TRACE");        fi
-
-    "$BIN" "${PLAY_ARGS[@]}" 2>&1 | tee "$PLAY_LOG"
-
+    [[ -n "$TRACE" ]] && PLAY_ARGS+=(--trace "$TRACE")
+ 
+    "$BIN" "${PLAY_ARGS[@]}" | tee "$PLAY_LOG"
+ 
     if [[ $PLOT -eq 1 && -f "$CSV" ]]; then
         local PLOT_OUT="$OUTDIR/play_plot.png"
-        local PLOT_ARGS=("$CSV" --out "$PLOT_OUT")
-        if [[ -n "$AINF" ]]; then PLOT_ARGS+=(--ainf "$AINF"); fi
         echo "[plot] Generating $PLOT_OUT ..."
-        python3 "$SCRIPT_DIR/plot_policy.py" "${PLOT_ARGS[@]}" \
+        python3 "$SCRIPT_DIR/plot_policy.py" "$CSV" --out "$PLOT_OUT" \
             && echo "[plot] Done." \
             || echo "[plot] Warning: plot failed (check plot_policy.py)" >&2
     fi
-
+ 
     echo ""
     echo "========================================================"
     echo " Play log : $PLAY_LOG"
     echo " CSV      : $CSV"
-    if [[ $PLOT -eq 1 ]]; then echo " Plot     : $OUTDIR/play_plot.png"; fi
+    [[ $PLOT -eq 1 ]] && echo " Plot     : $OUTDIR/play_plot.png"
     echo "========================================================"
 }
-
-\case "$MODE" in
+ 
+# ── Dispatch ───────────────────────────────────────────────────────────────────
+case "$MODE" in
     transform) run_transform ;;
     synth)     run_synth     ;;
     play)      run_play      ;;

@@ -11,6 +11,7 @@
 
 class HoaAutomaton {
 public:
+    // Parse from an already-open stream
     static HoaAutomaton parse(std::istream& in) {
         HoaAutomaton aut;
         aut.parse_impl(in);
@@ -24,7 +25,7 @@ public:
     }
 
     int start_state() const { return start_; }
-    int num_states()  const { return num_states_; }
+    int num_states() const { return num_states_; }
 
     int ap_index(const std::string& name) const {
         auto it = ap_name_to_idx_.find(name);
@@ -43,17 +44,12 @@ public:
     int step_bits(int q, const std::vector<bool>& val) const {
         if (q < 0 || q >= (int)transitions_.size())
             throw std::out_of_range("HoaAutomaton::step: state " + std::to_string(q) + " out of range");
-    
         for (const auto& [guard, target] : transitions_[q]) {
             if (eval_guard(guard, val)) return target;
         }
         throw std::runtime_error("HoaAutomaton::step: no matching transition from state "
                                   + std::to_string(q) + " (automaton not exhaustive for this valuation)");
     }
-
-    int num_aps() const { return static_cast<int>(ap_names_.size()); }
-    
-    const std::vector<std::string>& ap_names() const { return ap_names_; }
 
 private:
     struct GuardNode {
@@ -81,16 +77,7 @@ private:
                 for (const auto& c : g.children) if (eval_guard(c, val)) return true;
                 return false;
         }
-        return false; // unreachable
-    }
-
-    void check_guard_aps(const GuardNode& g, const std::string& line) const {
-        if (g.kind == GuardNode::AP &&
-            (g.ap_idx < 0 || g.ap_idx >= static_cast<int>(ap_names_.size())))
-            throw std::runtime_error("HoaAutomaton: guard references AP " + std::to_string(g.ap_idx)
-                                    + " but only " + std::to_string(ap_names_.size())
-                                    + " declared, in: " + line);
-        for (const auto& c : g.children) check_guard_aps(c, line);
+        return false;
     }
 
     // Guard parser
@@ -153,9 +140,8 @@ private:
                 if (pos < s.size() && s[pos] == ')') pos++;
                 return inner;
             }
-            if (pos < s.size() && s[pos] == 't') { pos++; GuardNode n; n.kind = GuardNode::TRUE;  return n; }
+            if (pos < s.size() && s[pos] == 't') { pos++; GuardNode n; n.kind = GuardNode::TRUE; return n; }
             if (pos < s.size() && s[pos] == 'f') { pos++; GuardNode n; n.kind = GuardNode::FALSE; return n; }
-            // AP reference: a decimal integer (the HOA AP index)
             size_t start = pos;
             while (pos < s.size() && isdigit((unsigned char)s[pos])) pos++;
             if (pos == start)
@@ -223,7 +209,6 @@ private:
                     throw std::runtime_error("HoaAutomaton: transition line before any 'State:' line");
 
                 GuardNode guard = parse_guard(guard_text);
-                check_guard_aps(guard, trimmed);
                 transitions_[cur_state].emplace_back(std::move(guard), target);
             }
         }

@@ -39,8 +39,8 @@ private:
     std::vector<int> env_vertices;
 
 public:
-    int num_states;
-    int init;
+    int num_states = 0;
+    int init = 0;
 
     State_space() = default;
     explicit State_space(int n);

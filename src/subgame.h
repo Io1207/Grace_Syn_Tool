@@ -55,21 +55,19 @@ inline std::vector<std::vector<int>> decreasing_subsets(int n) {
 
 struct SynthesisConfig {
     std::string fairsyn_bin;
-    /***** FIXED: new field controller_query_bin added to SynthesisConfig *****/
-    std::string controller_query_bin; // path to controller_query binary
+    std::string controller_query_bin;
     std::string work_dir;
     FairsynConfig fc;
     GR1_spec full_spec;
     bool verbose = true;
     bool parallel = false;
+    // for debugging
     bool keep_tmp = false;
+    bool no_prune = false;
     std::string shared_arena_path;
 };
 
-// BDD-based realizability check: calls controller_query <bdd> -1 -1.
-// Returns true if the winning region is nonempty.
-inline bool extract_winning_region_bdd(const std::string& controller_query_bin,
-                                       const std::string& bdd_file)
+inline bool extract_winning_region_bdd(const std::string& controller_query_bin, const std::string& bdd_file)
 {
     // Call: controller_query <bdd> -1 -1
     // Returns "1" if winning region is nonempty (realizable), "0" otherwise.
@@ -87,6 +85,13 @@ inline bool extract_winning_region_bdd(const std::string& controller_query_bin,
     return result == "1";
 }
 
+inline uint32_t to_mask(const std::vector<int>& v) {
+    uint32_t m = 0; for (int i : v) m |= (1u << i); return m;
+}
+inline bool is_subset_mask(uint32_t sub, uint32_t sup) {
+    return (sub & sup) == sub;
+}
+
 struct SubgameTask {
     std::vector<int> a_tilde;
     std::vector<int> g_tilde;
@@ -99,258 +104,481 @@ struct SubgameTask {
     std::string hoa_f;      // rabin.hoa
 };
 
-inline int synth_level(const SubgameKey& k, int m, int n) {
-    return (n - __builtin_popcount(k.g)) * (m + 1) + __builtin_popcount(k.a);
-}
-
 /// implementing Algorithm 1 from the paper
 // also allows for parallel execution of the loops 
 inline int run_synthesis_loop(Game& game, const SynthesisConfig& cfg, OptLib& lib)
 {
     namespace fs = std::filesystem;
-    using Clock = std::chrono::steady_clock;
     fs::create_directories(cfg.work_dir);
 
-    const int  m = game.n_a, n = game.n_g, n_orig = game.num_states, n_tv = 2 * n_orig;
-    const Mask full_a = full_mask(m), full_g = full_mask(n);
+    const int m = game.n_a;
+    const int n = game.n_g;
+    const int n_orig = game.num_states;
 
     const auto& owner = game.get_state_space()->get_owner();
-    const auto& play_id = lib.get_play_id();
-    const auto& show_id = lib.get_show_id();
-    std::vector<int> eve_orig;
-    for (int v = 0; v < n_orig; v++) if (owner[v] == 0) eve_orig.push_back(v);
+    std::vector<int> eve_v, adam_v;
+    for (int v = 0; v < n_orig; v++) {
+        if (owner[v] == 0) eve_v.push_back(v);
+        else adam_v.push_back(v);
+    }
+    const int n_eve = static_cast<int>(eve_v.size());
+    const int n_adam = n_orig - n_eve;
+    std::vector<int> play_id(n_orig,-1), choose_id(n_orig,-1), show_id(n_orig,-1);
+    for (int i=0; i < n_eve; i++) play_id[eve_v[i]] = i;
+    for (int i=0; i < n_adam; i++) choose_id[adam_v[i]] = n_eve+i;
+    for (int v=0; v < n_orig; v++) show_id[v] = n_orig + v;
 
-    FairsynConfig fc = cfg.fc;
-    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-    const unsigned max_threads = cfg.parallel ? hw : 1u;
-    if (fc.n_workers <= 0)
-        fc.n_workers = static_cast<int>(std::max(1u, hw / max_threads));
-    if (cfg.verbose)
-        std::cout << "[synth] fairsyn: ubdd_type=" << fc.ubdd_type << " n_workers=" << 
-                     fc.n_workers << " x " << max_threads << " concurrent call(s)\n";
+    auto g_seqs = decreasing_subsets(n);
+    auto a_seqs = increasing_subsets(m);
 
-    struct Job {
-        SubgameKey key;
-        std::string label, tmp_dir, spec_f, cfg_f, out_f, bdd_f, hoa_f, win_f;
-        int rc = -1;
+    auto fmt = [](const std::vector<int>& v) {
+        if (v.empty()) return std::string("empty");
+        std::string s;
+        for (int i=0;i<(int)v.size();i++) { if(i) s+=","; s+=std::to_string(v[i]); }
+        return s;
     };
 
+    using Clock = std::chrono::steady_clock;
     std::chrono::duration<double, std::milli> synth_wall_ms{0};
-    int synth_calls = 0, n_unreal = 0, n_failed = 0, n_stored = 0, n_pruned = 0;
-    std::mutex mu;
+    int synth_calls = 0;
+    int synth_failures = 0;
+    int success_count = 0;
+    int skipped_full = 0;
+    int skipped_triv = 0;
 
-    std::set<int> W;
-    std::vector<char> W_bits(n_tv, 0);
-    std::map<SubgameKey, std::vector<char>> solved_Z;
+    // ── Shared helpers ──────────────────────────────────────────────────────
+    // Single shared temp dir —> reused across all subgames
+    // If realizable -> move outputs to dedicated subgame dir
+    // If unrealizable -> typically delete tmp and use for next subgame
+    const std::string tmp_dir = cfg.work_dir + "/tmp_synth";
+    const std::string tmp_spec = tmp_dir + "/spec.txt";
+    const std::string tmp_cfg = tmp_dir + "/config.json";
+    const std::string tmp_out = tmp_dir + "/output.txt";
+    const std::string tmp_bdd = tmp_dir + "/controller.bdd";
+    const std::string tmp_hoa = tmp_dir + "/rabin.hoa";
+    fs::create_directories(tmp_dir);
 
-    auto make_job = [&](const SubgameKey& k) {
-        Job j;
-        j.key = k;
-        j.label = fmt_key(k);
-        j.tmp_dir = cfg.work_dir + "/tmp_" + j.label;
-        j.spec_f = j.tmp_dir + "/spec.txt";
-        j.cfg_f = j.tmp_dir + "/config.json";
-        j.out_f = j.tmp_dir + "/output.txt";
-        j.bdd_f = j.tmp_dir + "/controller.bdd";
-        j.hoa_f = j.tmp_dir + "/rabin.hoa";
-        j.win_f = j.tmp_dir + "/winning_vertices.txt";
-        return j;
-    };
+    std::vector<std::pair<uint32_t,uint32_t>> realized_masks;
+    struct RealizedDir { uint32_t a; uint32_t g; std::string dir; };
+    std::vector<RealizedDir> realized_dirs;
+    std::set<int> last_Z;
 
-    // Write spec + config. Spec gets G(in_W) once W is known (i.e. for all but the full game)
-    auto prepare = [&](Job& j) -> bool {
+    // Run fairsyn for one (a_tilde, g_tilde) pair and store if realizable.
+    // Returns true if stored successfully.
+    auto run_one = [&](const std::vector<int>& a_tilde, const std::vector<int>& g_tilde,
+                        const std::set<int>& w_verts = {}) -> bool
+    {
+        uint32_t a_mask = to_mask(a_tilde);
+        uint32_t g_mask = to_mask(g_tilde);
+        // Dominated checks happen in the outer loop (sequential) or post-synthesis (parallel) - not inside run_one itself
+
+        std::string label = "A{"+fmt(a_tilde)+"}_G{"+fmt(g_tilde)+"}";
+        if (cfg.verbose) std::cout << "[subgame] " << label << "\n";
+
         try {
-            fs::create_directories(j.tmp_dir);
-            for (const std::string& f : {j.bdd_f, j.bdd_f + ".meta", j.hoa_f, j.win_f})
-                fs::remove(f);
-            write_obliging_spec(game, cfg.full_spec, from_mask(j.key.a), from_mask(j.key.g), W, j.spec_f);
-            write_config_json(cfg.shared_arena_path, fs::absolute(j.spec_f).string(), fs::absolute(j.out_f).string(),
-                              fs::absolute(j.hoa_f).string(), fs::absolute(j.bdd_f).string(),
-                              fs::absolute(j.win_f).string(), fc, j.cfg_f);
+            write_obliging_spec(game, cfg.full_spec, a_tilde, g_tilde, w_verts, tmp_spec);
+            std::string win_verts_path = fs::absolute(tmp_dir + "/winning_vertices.txt").string();
+            write_config_json(cfg.shared_arena_path, fs::absolute(tmp_spec).string(),
+                              fs::absolute(tmp_out).string(), fs::absolute(tmp_hoa).string(),
+                              fs::absolute(tmp_bdd).string(), win_verts_path,
+                              cfg.fc, tmp_cfg);
+        } catch (const std::exception& e) {
+            std::cerr << "  [warn] write failed: " << e.what() << "\n";
+            return false;
+        }
+
+        fs::remove(tmp_bdd);
+        fs::remove(tmp_hoa);
+        fs::remove(std::string(tmp_bdd) + ".meta");
+        fs::remove(tmp_dir + "/winning_vertices.txt");
+
+        std::string cmd = cfg.fairsyn_bin + " \"" + tmp_cfg + "\"";
+        if (cfg.verbose) std::cout << "  $ " << cmd << "\n";
+        std::cout << std::flush;  // keep log lines ordered before the child's output
+        auto t0 = Clock::now();
+        int rc = std::system(cmd.c_str());
+        synth_wall_ms += Clock::now() - t0;
+        synth_calls++;
+        if (rc != 0) {
+            synth_failures++;
+            // WEXITSTATUS extracts the real exit code from the status returned by system()
+            int exit_code = WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
+            std::cerr << "  [fail] fairsyn exited with code " << exit_code
+                      << " (raw status=" << rc << ")\n"
+                      << "  [fail] config: " << tmp_cfg << "\n"
+                      << "  [fail] arena:  " << cfg.shared_arena_path << "\n"
+                      << "  [fail] spec:   " << tmp_spec << "\n";
+            return false;
+        }
+
+        // BDD realizability check
+        if (!extract_winning_region_bdd(cfg.controller_query_bin, tmp_bdd)) {
+            synth_failures++;
+            if (cfg.verbose)
+                std::cout << "  [unrealizable] BDD is zero — skipping.\n";
+            return false;
+        }
+
+        // Move outputs to permanent subgame directory
+        std::string sub_dir  = cfg.work_dir + "/" + label;
+        std::string bdd_perm = sub_dir + "/controller.bdd";
+        std::string hoa_perm = sub_dir + "/rabin.hoa";
+        try {
+            fs::create_directories(sub_dir);
+            fs::copy_file(tmp_bdd, bdd_perm, fs::copy_options::overwrite_existing);
+            std::string tmp_meta = tmp_bdd + ".meta";
+            if (fs::exists(tmp_meta))
+                fs::copy_file(tmp_meta, bdd_perm+".meta",
+                              fs::copy_options::overwrite_existing);
+            fs::copy_file(tmp_hoa, hoa_perm, fs::copy_options::overwrite_existing);
+        } catch (const std::exception& e) {
+            std::cerr << "  [warn] move failed: " << e.what() << "\n";
+            return false;
+        }
+
+        try {
+            lib.store(a_tilde, g_tilde,
+                      cfg.controller_query_bin, bdd_perm, hoa_perm);
+            success_count++;
+            realized_masks.emplace_back(a_mask, g_mask);
+            realized_dirs.push_back({a_mask, g_mask, sub_dir});
+            last_Z.clear();
+            {
+                std::ifstream zf(tmp_dir + "/winning_vertices.txt");
+                int zv;
+                while (zf >> zv)
+                    if (zv >= 0 && zv < (int)eve_v.size()) last_Z.insert(zv);
+            }
+            // Persist Z next to the controller: Gamma(v, B) lookup at play time needs to
+            // know from which vertices this (A~, G~) strategy is winning
+            {
+                std::ofstream zo(sub_dir + "/eve_winning.txt");
+                for (int zv : last_Z) zo << zv << "\n";
+            }
+            if (cfg.verbose)
+                std::cout << "  [ok] stored: " << label << "\n";
             return true;
         } catch (const std::exception& e) {
-            std::cerr << "  [warn] " << j.label << ": write failed: " << e.what() << "\n";
+            std::cerr << "  [warn] store failed: " << e.what() << "\n";
             return false;
         }
     };
 
-    auto run = [&](Job& j) {
-        std::string cmd = cfg.fairsyn_bin + " \"" + j.cfg_f + "\"";
-        auto t0 = Clock::now();
-        j.rc = std::system(cmd.c_str());
-        auto dt = Clock::now() - t0;
-        std::lock_guard<std::mutex> lk(mu);
-        synth_wall_ms += dt;
-        synth_calls++;
-        if (cfg.verbose) std::cout << "  [" << (j.rc == 0 ? "done" : "fail") << "] " << j.label << "\n";
+    // A skipped (A~, G~) is still saved when some realized entry (A0, G0) dominates it
+    // That strategy is also winning for (A~, G~), so its controller + automaton are copied
+    // into the A~->G~ folder and registered in the library. No synth call
+    // Return true if an alias was stored
+    auto store_alias = [&](const std::vector<int>& a_tilde, const std::vector<int>& g_tilde) -> bool
+    {
+        uint32_t a_mask = to_mask(a_tilde), g_mask = to_mask(g_tilde);
+        const RealizedDir* dom = nullptr;
+        for (const auto& r : realized_dirs) {
+            if ((r.a & a_mask) == r.a && (g_mask & r.g) == g_mask) {
+                if (!dom || __builtin_popcount(r.g) < __builtin_popcount(dom->g)) dom = &r;
+            }
+        }
+        if (!dom) return false;
+        std::string label   = "A{"+fmt(a_tilde)+"}_G{"+fmt(g_tilde)+"}";
+        std::string sub_dir = cfg.work_dir + "/" + label;
+        std::string bdd_perm = sub_dir + "/controller.bdd";
+        std::string hoa_perm = sub_dir + "/rabin.hoa";
+        try {
+            fs::create_directories(sub_dir);
+            fs::copy_file(dom->dir + "/controller.bdd", bdd_perm, fs::copy_options::overwrite_existing);
+            if (fs::exists(dom->dir + "/controller.bdd.meta"))
+                fs::copy_file(dom->dir + "/controller.bdd.meta", bdd_perm + ".meta",
+                              fs::copy_options::overwrite_existing);
+            fs::copy_file(dom->dir + "/rabin.hoa", hoa_perm, fs::copy_options::overwrite_existing);
+            if (fs::exists(dom->dir + "/eve_winning.txt"))
+                fs::copy_file(dom->dir + "/eve_winning.txt", sub_dir + "/eve_winning.txt",
+                              fs::copy_options::overwrite_existing);
+            lib.store(a_tilde, g_tilde, cfg.controller_query_bin, bdd_perm, hoa_perm);
+            success_count++;
+            realized_dirs.push_back({a_mask, g_mask, sub_dir});
+            if (cfg.verbose)
+                std::cout << "[alias] " << label << " saved from " << fs::path(dom->dir).filename().string()
+                          << " (no synthesis call)\n";
+            return true;
+        } catch (const std::exception& e) {
+            std::cerr << "  [warn] alias store failed for " << label << ": " << e.what() << "\n";
+            return false;
+        }
     };
 
-    auto run_all = [&](std::vector<Job>& jobs) {
-        unsigned n_threads = max_threads;
-        n_threads = std::min<unsigned>(n_threads, static_cast<unsigned>(jobs.size()));
-        std::atomic<size_t> next{0};
-        auto worker = [&]() {
-            for (size_t i; (i = next.fetch_add(1)) < jobs.size(); ) run(jobs[i]);
-        };
-        if (n_threads <= 1) { worker(); return; }
-        std::vector<std::thread> ts;
-        for (unsigned t = 0; t < n_threads; t++) ts.emplace_back(worker);
-        for (auto& t : ts) t.join();
-    };
+    // Always synthesize the full game to get W
+    // This provides the guaranteed fallback for all other subgames at runtime
+    std::vector<int> full_a(m); std::iota(full_a.begin(), full_a.end(), 0);
+    std::vector<int> full_g(n); std::iota(full_g.begin(), full_g.end(), 0);
 
-    auto finish = [&](Job& j) -> bool {
-        bool ok = false;
-        if (j.rc != 0) {
-            n_failed++;
-            int code = WIFEXITED(j.rc) ? WEXITSTATUS(j.rc) : -1;
+    if (cfg.verbose)
+        std::cout << "[synth] Synthesizing full game (A=all, G=all) first...\n";
+    bool full_game_ok = run_one(full_a, full_g);  // empty w_verts for full-game itself
+    if (!full_game_ok)
+        std::cerr << "[warn] Full game (all_a→all_g) is unrealizable — "
+                  << "runtime fallback will not work correctly.\n";
+
+    // Read W from the winning_vertices.txt fairsyn just wrote
+    std::set<int> W;
+    {
+        std::string win_file = tmp_dir + "/winning_vertices.txt";
+        std::string win_perm = cfg.work_dir + "/winning_vertices.txt";
+        std::ifstream wf(win_file);
+        if (wf) {
+            int v; while (wf >> v) W.insert(v);
             
-            std::cerr << "  [fail] " << j.label << ": fairsyn exit code " << code << " (config: " << j.cfg_f << ")\n";
-            
-        } else if (!extract_winning_region_bdd(cfg.controller_query_bin, j.bdd_f)) {
-            n_unreal++;
-            if (cfg.verbose) std::cout << "  [unrealizable] " << j.label << "\n";
+            {
+                const auto* ss0 = game.get_state_space();
+                const auto& own0 = ss0->get_owner();
+                int nn = game.num_states;
+                std::vector<int> eve0, adam0;
+                for (int u = 0; u < nn; u++) (own0[u] == 0 ? eve0 : adam0).push_back(u);
+                int ne = (int)eve0.size();
+                std::vector<int> pid(nn, -1), cid(nn, -1);
+                for (int i = 0; i < ne; i++) pid[eve0[i]] = i;
+                for (int i = 0; i < (int)adam0.size(); i++) cid[adam0[i]] = ne + i;
+                std::set<int> cand;
+                for (int u : adam0) cand.insert(cid[u]);
+                bool changed = true;
+                while (changed) {
+                    changed = false;
+                    for (int u : adam0) {
+                        int c = cid[u];
+                        if (!cand.count(c)) continue;
+                        bool ok = W.count(nn + u) > 0;            // show(u)
+                        for (int x : ss0->get_post(u)) {
+                            if (!ok) break;
+                            int dst = (own0[x] == 0) ? pid[x] : cid[x];
+                            ok = (own0[x] == 0) ? W.count(dst) > 0 : cand.count(dst) > 0;
+                        }
+                        if (!ok) { cand.erase(c); changed = true; }
+                    }
+                }
+                for (int c : cand) W.insert(c);
+            }
+            std::ofstream wp(win_perm);
+            for (int v2 : W) wp << v2 << "\n";
+            if (cfg.verbose)
+                std::cout << "[synth] Winning region |W|=" << W.size()
+                          << " transformed vertices.\n";
         } else {
-            const std::string sub_dir  = cfg.work_dir + "/" + j.label;
-            const std::string bdd_perm = sub_dir + "/controller.bdd";
-            const std::string hoa_perm = sub_dir + "/rabin.hoa";
-            const auto ow = fs::copy_options::overwrite_existing;
-            try {
-                fs::create_directories(sub_dir);
-                fs::copy_file(j.bdd_f, bdd_perm, ow);
-                if (fs::exists(j.bdd_f + ".meta")) fs::copy_file(j.bdd_f + ".meta", bdd_perm + ".meta", ow);
-                fs::copy_file(j.hoa_f, hoa_perm, ow);
-                if (fs::exists(j.win_f)) fs::copy_file(j.win_f, sub_dir + "/winning_vertices.txt", ow);
-                lib.store(j.key, cfg.controller_query_bin, bdd_perm, hoa_perm);
-                n_stored++;
-                ok = true;
-                if (cfg.verbose) std::cout << "  [ok] stored: " << j.label << "\n";
-            } catch (const std::exception& e) {
-                std::cerr << "  [warn] " << j.label << ": store failed: " << e.what() << "\n";
+            std::cerr << "[warn] Could not read winning_vertices.txt — "
+                      << "G(in_W) constraint will not be applied.\n";
+        }
+    }
+
+    // ========================================================================
+    // SEQUENTIAL MODE
+    // ========================================================================
+    if (!cfg.parallel) {
+        // Coverage bookkeeping for Algorithm 1: covered[A'] = Eve vertices v (play IDs)
+        // for which some realized (A~, G~) with A~ subset of A' already provides Gamma(v, A').
+        std::set<int> T;                                   // Eve vertices of W
+        for (int i = 0; i < (int)eve_v.size(); i++) if (W.count(i)) T.insert(i);
+        std::vector<std::set<int>> covered(size_t(1) << m);
+        auto add_cov = [&](uint32_t amask) {
+            for (uint32_t b = 0; b < (1u << m); b++)
+                if ((b & amask) == amask) covered[b].insert(last_Z.begin(), last_Z.end());
+        };
+        auto is_cov = [&](uint32_t amask) {
+            for (int v : T) if (!covered[amask].count(v)) return false;
+            return true;
+        };
+        auto all_cov = [&]() {
+            for (uint32_t b = 0; b < (1u << m); b++) if (!is_cov(b)) return false;
+            return true;
+        };
+        bool halt = false;
+        if (full_game_ok) add_cov(to_mask(full_a));        // full game covers all of W for A
+        for (const auto& g_tilde : g_seqs) {
+            if (halt) break;
+            if (g_tilde.empty()) {
+                // G~ = empty only requires staying in W (Condition (c)); the full-game
+                // strategy already does that, so it serves as Gamma(v, .) for every
+                // vertex that no nonempty G~ covers. No synth call needed
+                skipped_triv += static_cast<int>(a_seqs.size());
+                continue;
             }
 
-            if (ok) {
-                try {
-                    std::ifstream wf(j.win_f);
-                    if (!wf) throw std::runtime_error("winning_vertices file not written");
-                    std::vector<char> z(n_tv, 0);
-                    int tv;
-                    while (wf >> tv) {
-                        if (tv < 0 || tv >= n_tv)
-                            throw std::runtime_error("winning vertex " + std::to_string(tv) + " out of range");
-                        z[tv] = 1;
-                    }
-                    solved_Z[j.key] = std::move(z);
-                } catch (const std::exception& e) {
-                    std::cerr << "  [warn] " << j.label << ": " << e.what()
-                              << " — excluded from pruning coverage\n";
+            for (const auto& a_tilde : a_seqs) {
+                // Skip the full-game subgame — already done
+                if (a_tilde == full_a && g_tilde == full_g) continue;
+
+                uint32_t a_mask = to_mask(a_tilde);
+                if (!cfg.no_prune && full_game_ok && !T.empty() && is_cov(a_mask)) {
+                    if (!store_alias(a_tilde, g_tilde) && cfg.verbose)
+                        std::cout << "[prune] A{" << fmt(a_tilde) << "}_G{" << fmt(g_tilde)
+                                  << "} — every Eve vertex of W already covered for this A. Skipping.\n";
+                    skipped_full++;
+                    continue;
+                }
+
+                if (run_one(a_tilde, g_tilde, W)) {
+                    add_cov(a_mask);
+                    if (all_cov()) { halt = true; break; }
                 }
             }
         }
-        if (!cfg.keep_tmp) { std::error_code ec; fs::remove_all(j.tmp_dir, ec); }
-        return ok;
-    };
-
-    auto is_covered = [&](const SubgameKey& cand) {
-        const int lvl = synth_level(cand, m, n);
-        std::vector<const std::vector<char>*> earlier;
-        for (const auto& [k, z] : solved_Z)
-            if (synth_level(k, m, n) < lvl && is_subset(k.a, cand.a)) earlier.push_back(&z);
-        if (earlier.empty()) return false;
-
-        for (int u : eve_orig) {
-            const int copies[2] = {play_id[u], show_id[u]};
-            bool covered = false;
-            for (const auto* z : earlier) {
-                bool all_in = true;
-                for (int tv : copies)
-                    if (W_bits[tv] && !(*z)[tv]) { all_in = false; break; }
-                if (all_in) { covered = true; break; }
-            }
-            if (!covered) return false;
-        }
-        return true;
-    };
-
-    {
-        std::vector<Job> first{make_job({full_a, full_g})};
-        if (cfg.verbose) std::cout << "[synth] Full game " << first[0].label << " (defines W)\n";
-        if (prepare(first[0])) { run_all(first); finish(first[0]); }
-
-        auto it = solved_Z.find(first[0].key);
-        if (it == solved_Z.end()) {
-            std::cerr << "[error] Full game unrealizable or its winning set is unavailable - W undefined, aborting synthesis.\n";
-            return n_stored;
-        }
-        W_bits = it->second;
-        for (int tv = 0; tv < n_tv; tv++) if (W_bits[tv]) W.insert(tv);
-        if (W.empty()) {
-            std::cerr << "[error] W is empty — aborting synthesis.\n";
-            return n_stored;
-        }
-        std::ofstream wp(cfg.work_dir + "/winning_vertices.txt");
-        for (int tv : W) wp << tv << "\n";
-        lib.set_winning_region(W);
-
-        lib.alias({0, 0}, first[0].key);
-
-        if (cfg.verbose) std::cout << "[synth] |W| = " << W.size() << " transformed vertices\n";
-        if (!W.count(lib.transformed_target(game.init)))
-            std::cerr << "[warn] initial vertex " << game.init << " is not in W — the paper's guarantees do not apply from it.\n";
     }
 
-    // Remaining subgames, level by level
-    std::map<int, std::vector<SubgameKey>> by_level;
-    for (Mask g = 0; g < (Mask(1) << n); g++)
-        for (Mask a = 0; a < (Mask(1) << m); a++) {
-            if (a == full_a && g == full_g) continue;
-            if (g == 0) continue;
-            by_level[synth_level({a, g}, m, n)].push_back({a, g});
+    // ========================================================================
+    // PARALLEL MODE
+    // ========================================================================
+    else {
+        if (cfg.verbose)
+            std::cout << "[parallel] Writing input files for all subgames...\n";
+
+        std::vector<SubgameTask> tasks;
+        for (const auto& g_tilde : g_seqs) {
+            if (g_tilde.empty()) { skipped_triv += static_cast<int>(a_seqs.size()); continue; }
+            for (const auto& a_tilde : a_seqs) {
+                if (a_tilde == full_a && g_tilde == full_g) continue;
+                std::string label = "A{"+fmt(a_tilde)+"}_G{"+fmt(g_tilde)+"}";
+                std::string par_tmp = cfg.work_dir + "/tmp_" + label;
+                SubgameTask task;
+                task.a_tilde = a_tilde; task.g_tilde = g_tilde;
+                task.label = label;
+                task.spec_f = par_tmp + "/spec.txt";
+                task.cfg_f = par_tmp + "/config.json";
+                task.bdd_f = par_tmp + "/controller.bdd";
+                task.hoa_f = par_tmp + "/rabin.hoa";
+                std::string par_out = par_tmp + "/output.txt";
+                try {
+                    fs::create_directories(par_tmp);
+                    write_obliging_spec(game, cfg.full_spec, a_tilde, g_tilde, W, task.spec_f);
+                    write_config_json(cfg.shared_arena_path,
+                                      fs::absolute(task.spec_f).string(),
+                                      fs::absolute(par_out).string(),
+                                      fs::absolute(task.hoa_f).string(),
+                                      fs::absolute(task.bdd_f).string(),
+                                      fs::absolute(par_tmp + "/winning_vertices.txt").string(),
+                                      cfg.fc, task.cfg_f);
+                    tasks.push_back(std::move(task));
+                } catch (const std::exception& e) {
+                    std::cerr << "[warn] write failed for " << label << ": " << e.what() << "\n";
+                }
+            }
         }
 
-    for (auto& [lvl, keys] : by_level) {
-        std::vector<Job> jobs;
-        for (const auto& k : keys) {
-            if (is_covered(k)) {
-                n_pruned++;
-                if (cfg.verbose) std::cout << "  [pruned] " << fmt_key(k) << " — earlier strategies cover W\n";
+        unsigned int max_threads = std::max(1u, std::thread::hardware_concurrency());
+        if (cfg.verbose)
+            std::cout << "[parallel] Running " << tasks.size()
+                      << " synthesis calls across " << max_threads << " threads.\n";
+
+        std::vector<int> return_codes(tasks.size(), -1);
+        std::mutex print_mutex;
+        std::atomic<int> task_idx{0};
+
+        auto worker = [&]() {
+            while (true) {
+                int idx = task_idx.fetch_add(1);
+                if (idx >= (int)tasks.size()) break;
+                const auto& task = tasks[idx];
+                std::string cmd = cfg.fairsyn_bin + " \"" + task.cfg_f + "\"";
+                std::cout << std::flush;
+                auto t0 = Clock::now();
+                int rc = std::system(cmd.c_str());
+                auto t1 = Clock::now();
+                {
+                    std::lock_guard<std::mutex> lk(print_mutex);
+                    synth_wall_ms += t1 - t0;
+                    synth_calls++;
+                    if (rc != 0) synth_failures++;
+                    if (cfg.verbose)
+                        std::cout << "  [" << (rc==0?"ok":"fail") << "] " << task.label << "\n";
+                }
+                return_codes[idx] = rc;
+            }
+        };
+
+        std::vector<std::thread> threads;
+        for (unsigned int i = 0; i < max_threads; i++) threads.emplace_back(worker);
+        for (auto& t : threads) t.join();
+
+        for (int i = 0; i < (int)tasks.size(); i++) {
+            if (return_codes[i] != 0) continue;
+            const auto& task = tasks[i];
+
+            if (!extract_winning_region_bdd(cfg.controller_query_bin, task.bdd_f)) {
+                if (cfg.verbose)
+                    std::cout << "  [unrealizable] " << task.label << " — BDD is zero.\n";
+                synth_failures++;
                 continue;
             }
-            Job j = make_job(k);
-            if (prepare(j)) jobs.push_back(std::move(j));
-            else            n_failed++;
+
+            std::string sub_dir  = cfg.work_dir + "/" + task.label;
+            std::string bdd_perm = sub_dir + "/controller.bdd";
+            std::string hoa_perm = sub_dir + "/rabin.hoa";
+            try {
+                fs::create_directories(sub_dir);
+                fs::copy_file(task.bdd_f, bdd_perm, fs::copy_options::overwrite_existing);
+                std::string tmp_meta = task.bdd_f + ".meta";
+                if (fs::exists(tmp_meta))
+                    fs::copy_file(tmp_meta, bdd_perm+".meta",
+                                  fs::copy_options::overwrite_existing);
+                fs::copy_file(task.hoa_f, hoa_perm, fs::copy_options::overwrite_existing);
+
+                lib.store(task.a_tilde, task.g_tilde,
+                          cfg.controller_query_bin, bdd_perm, hoa_perm);
+                success_count++;
+                {
+                    // Eve play IDs of this entry's winning region (see sequential run_one)
+                    std::ifstream zf(fs::path(task.bdd_f).parent_path() / "winning_vertices.txt");
+                    std::ofstream zo(sub_dir + "/eve_winning.txt");
+                    int zv;
+                    while (zf >> zv)
+                        if (zv >= 0 && zv < (int)eve_v.size()) zo << zv << "\n";
+                }
+                if (cfg.verbose)
+                    std::cout << "  [stored] " << task.label << "\n";
+            } catch (const std::exception& e) {
+                std::cerr << "[warn] store failed for " << task.label << ": " << e.what() << "\n";
+            }
         }
-        if (jobs.empty()) continue;
-        if (cfg.verbose) std::cout << "[synth] level " << lvl << ": " << jobs.size() << " call(s)\n";
-        run_all(jobs);
-        for (auto& j : jobs) finish(j);
     }
 
-    const int total = 2 + static_cast<int>([&]{ size_t s = 0; for (auto& [l, k] : by_level) s += k.size(); return s; }());
-    std::cout << "\n[timing] Subgames total     : " << total << "\n"
-                   "[timing] Synthesis calls    : " << synth_calls << "\n"
-                   "[timing] Pruned (coverage)  : " << n_pruned << "\n"
-                   "[timing] Realizable/stored  : " << n_stored << "\n"
-                   "[timing] Unrealizable       : " << n_unreal << "\n"
-                   "[timing] Failed             : " << n_failed << "\n"
-                   "[timing] Synthesis time     : "
-              << std::fixed << std::setprecision(1) << synth_wall_ms.count() << " ms"
-              << (cfg.parallel ? " (summed over threads)" : "") << "\n";
+    if (cfg.verbose && (skipped_full + skipped_triv) > 0)
+        std::cout << "[prune] Skipped " << skipped_triv
+                  << " trivial (G~=empty) + " << skipped_full << " dominated\n";
+
+    double total_ms = synth_wall_ms.count();
+    int successes = synth_calls - synth_failures;
+    std::cout << "\n[timing] Synthesis calls    : " << synth_calls   << "\n"
+                 "[timing] Realizable         : " << successes     << "\n"
+                 "[timing] Unrealizable       : " << synth_failures << "\n"
+                 "[timing] Total wall time    : "
+              << std::fixed << std::setprecision(1) << total_ms << " ms\n";
+    if (successes > 0)
+        std::cout << "[timing] Avg per realizable : "
+                  << std::setprecision(1) << total_ms/successes << " ms\n";
+    if (cfg.parallel)
+        std::cout << "[timing] (parallel — wall time reflects longest thread)\n";
+    std::cout << "\n";
 
     {
         auto all_keys = lib.all_keys();
         if (!all_keys.empty()) {
             auto best = std::max_element(all_keys.begin(), all_keys.end(),
-                [](const SubgameKey& x, const SubgameKey& y) {
-                    int gx = __builtin_popcount(x.g), gy = __builtin_popcount(y.g);
-                    if (gx != gy) return gx < gy;
-                    return __builtin_popcount(x.a) > __builtin_popcount(y.a);
+                [](const SubgameKey& a, const SubgameKey& b) {
+                    if (a.g_indices.size() != b.g_indices.size())
+                        return a.g_indices.size() < b.g_indices.size();
+                    return a.a_indices.size() > b.a_indices.size();
                 });
-            std::cout << "\n[best]  Most guarantees: " << __builtin_popcount(best->g)
-                      << "/" << n << " with " << __builtin_popcount(best->a)
+            std::cout << "\n[best]  Most guarantees: " << best->g_indices.size()
+                      << "/" << n << " with " << best->a_indices.size()
                       << "/" << m << " assumptions\n"
-                      << "        Subgame: " << fmt_key(*best) << "\n";
+                      << "        Subgame: A{" << fmt(best->a_indices)
+                      << "}_G{" << fmt(best->g_indices) << "}\n";
         }
     }
     std::cout << "\n";
-    return n_stored;
+
+    if (!cfg.keep_tmp) {
+        fs::remove_all(tmp_dir);
+        if (cfg.verbose)
+            std::cout << "[synth] Temp dir removed: " << tmp_dir << "\n";
+    } else {
+        std::cout << "[synth] Temp dir kept (--skip-delete): " << tmp_dir << "\n";
+    }
+
+    return success_count;
 }

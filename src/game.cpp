@@ -4,10 +4,10 @@
 #include <stdexcept>
 
 State_space::State_space(int n)
-    : owner (n, 0), post (n), pre (n), region(n, PLAY), num_states(n) {}
+    : num_states(n), owner (n, 0), post (n), pre (n), region(n, PLAY) {}
 
 State_space::State_space(int n, int initial, std::vector<int> own, std::vector<std::vector<int>> edges)
-    : owner (std::move(own)), post (std::move(edges)), pre (n), region (n, PLAY), num_states(n), init (initial) {
+    : num_states(n), init (initial), owner (std::move(own)), post (std::move(edges)), pre (n), region (n, PLAY) {
     for (int i = 0; i < n; i++)
         for (int j : post[i]) pre[j].push_back(i);
 }
@@ -18,7 +18,7 @@ void State_space::add_edge(int from, int to) {
 }
 
 Game::Game(int n, int initial, State_space ss, bool live, bool safe, bool fair)
-    : ss(std::move(ss)), num_states(n), init(initial), liveness(live), safety(safe), fairness(fair) {}
+    : num_states(n), init(initial), liveness(live), safety(safe), fairness(fair) , ss(std::move(ss)) {}
 
 Game Game::transform_play_choose_show() const {
     const int n = num_states;
@@ -39,9 +39,9 @@ Game Game::transform_play_choose_show() const {
     for (int i = 0; i < n_adam; i++) choose_id[adam_verts[i]] = n_eve + i;
     for (int v = 0; v < n; v++) show_id[v] = n_eve + n_adam + v;
 
-    std::vector<int>              new_owner (sz, 0);
-    std::vector<std::vector<int>> new_post  (sz);
-    std::vector<int>              new_region(sz, PLAY);
+    std::vector<int> new_owner(sz, 0);
+    std::vector<std::vector<int>> new_post(sz);
+    std::vector<int> new_region(sz, PLAY);
 
     for (int v : eve_verts) {
         new_owner[play_id[v]] = 0; new_region[play_id[v]] = PLAY;
@@ -57,9 +57,8 @@ Game Game::transform_play_choose_show() const {
         const auto& succs = old_post[u];
         if (old_owner[u] == 0) {
             for (int v : succs) {
-                int dst = (old_owner[v] == 0) ? play_id[v] : choose_id[v];
-                new_post[play_id[u]].push_back(dst);
-                new_post[show_id[u]].push_back(dst);
+                new_post[play_id[u]].push_back(choose_id[v]);
+                new_post[show_id[u]].push_back(choose_id[v]);
             }
         } else {
             for (int v : succs) {
@@ -79,8 +78,7 @@ Game Game::transform_play_choose_show() const {
     new_ss.get_post() = std::move(new_post);
     new_ss.get_region() = std::move(new_region);
     for (int u = 0; u < sz; u++)
-        for (int w : new_ss.get_post()[u])
-            new_ss.get_pre()[w].push_back(u);
+        for (int w : new_ss.get_post()[u]) new_ss.get_pre()[w].push_back(u);
 
     Game result(sz, new_init, std::move(new_ss), liveness, safety, fairness);
 
@@ -98,7 +96,7 @@ Game Game::transform_play_choose_show() const {
         lifted.phi_str = g.phi_str;
         for (int s : g.states) {
             if (old_owner[s] == 0) lifted.states.insert(play_id[s]);
-            else lifted.states.insert(choose_id[s]);
+            else    lifted.states.insert(choose_id[s]);
             lifted.states.insert(show_id[s]);
         }
         rs.guarantees.push_back(std::move(lifted));
@@ -125,8 +123,8 @@ void Game::write_HOA(const std::string& filename) const
     if (!f) { std::cerr << "Could not open " << filename << "\n"; return; }
     write_HOA(f);
 }
-namespace {
 
+namespace {
     struct PropParser {
         const std::string& expr;
         const std::map<std::string, std::set<int>>& ap_map;
@@ -224,7 +222,7 @@ namespace {
 //
 // ENV_ASSUMPTIONS / SYS_GUARANTEES lines:
 //   <formula_label> <v1>,<v2>,...
-// The vertex list IS the states (Büchi set)
+// The vertex list IS the states (Buchi set)
 // ---------------------------------------------------------------------------
 Game parse_game(std::istream& in)
 {
@@ -241,8 +239,9 @@ Game parse_game(std::istream& in)
         int s, player;
         std::string edge_list;
         in >> s >> player >> edge_list;
-        // own[s] = player;
-        /***** FIXED: input convention 1=Eve,0=Adam normalized to internal 0=Eve,1=Adam *****/
+        // Input convention: 1=Eve(system), 0=Adam(environment)
+        // Internal convention: 0=Eve, 1=Adam
+        // why? because I am an idiot and I wrote the original code that way, and now I have to live with it
         own[s] = (player == 1) ? 0 : 1;
         if (!edge_list.empty() && edge_list != "-") {
             std::stringstream ss2(edge_list);
@@ -278,7 +277,6 @@ Game parse_game(std::istream& in)
             else    g.spec.guarantees.push_back(std::move(cj));
         }
     }
-    
     g.n_a = static_cast<int>(g.spec.assumptions.size());
     g.n_g = static_cast<int>(g.spec.guarantees.size());
     return g;
@@ -308,7 +306,7 @@ Game parse_game_fairsyn(const std::string& arena_file, const std::string& spec_f
         else adam_verts.push_back(i);
     }
     std::vector<int> order;
-    order.insert(order.end(), eve_verts.begin(),  eve_verts.end());
+    order.insert(order.end(), eve_verts.begin(), eve_verts.end());
     order.insert(order.end(), adam_verts.begin(), adam_verts.end());
 
     for (int row = 0; row < n; row++) {
@@ -380,9 +378,6 @@ Game parse_game_fairsyn(const std::string& arena_file, const std::string& spec_f
     return g;
 }
 
-// parse_game_with_spec  (rich format with APS section)
-// Populates both g.spec and the caller's spec reference
-// (may be the same object or a copy for the synthesis loop)
 Game parse_with_spec(std::istream& in, GR1_spec& out_spec)
 {
     int n, initial;
@@ -397,7 +392,7 @@ Game parse_with_spec(std::istream& in, GR1_spec& out_spec)
     for (int i = 0; i < n; i++) {
         int s, player; std::string el;
         in >> s >> player >> el;
-        
+        // own[s] = player;
         own[s] = (player == 1) ? 0 : 1;
         if (!el.empty() && el != "-") {
             std::stringstream ss2(el); std::string e;
